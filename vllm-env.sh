@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Blackcat Informatics Inc.
+# Copyright 2026 Blackcat Informatics Inc. / 2026 bitserv-ai
 # SPDX-License-Identifier: MIT
 #
 # vllm-env.sh - Environment activation for vLLM source builds
@@ -33,6 +33,8 @@ export VLLM_DIR="/opt/src/vllm"
 export VLLM_VENV="${VLLM_DIR}/.venv"
 export VLLM_SRC="${VLLM_DIR}/vllm"
 export VLLM_LOG="${VLLM_DIR}/build.log"
+export LLAMACPP_SRC="${VLLM_DIR}/llama.cpp"
+export LEMONADE_SRC="${VLLM_DIR}/lemonade"
 
 # =============================================================================
 # Unified Install Prefix
@@ -66,6 +68,46 @@ else
     export CXX=clang++
     _AMD_OPT=""
 fi
+
+# ccache: if installed, create a symlink directory that shadows every compiler
+# binary name. Symlinks are more reliable than CC="ccache clang" because they
+# intercept all invocations — cmake, ninja, hipcc, pip, setuptools — regardless
+# of how the build system resolves the compiler. The biggest win is AITER JIT
+# pre-warm: when AITER is rebuilt, all 55 .so files are invalidated and
+# recompiled from scratch. With ccache, those recompiles are cache hits.
+_CCACHE_DIR="${VLLM_DIR}/.ccache/bin"
+if command -v ccache &>/dev/null && [[ -z "${VLLM_NO_CCACHE:-}" ]]; then
+    mkdir -p "${_CCACHE_DIR}"
+    _ccache_bin="$(command -v ccache)"
+
+    # Create symlinks for every compiler name that might be invoked.
+    # ccache resolves the real compiler from CCACHE_PATH or the remainder
+    # of PATH after the symlink directory.
+    for _name in clang clang++ clang-22 \
+                 amdclang amdclang++ \
+                 hipcc hipcc.pl \
+                 gcc g++ cc c++; do
+        if [[ ! -L "${_CCACHE_DIR}/${_name}" ]]; then
+            ln -sf "${_ccache_bin}" "${_CCACHE_DIR}/${_name}"
+        fi
+    done
+    unset _name _ccache_bin
+
+    # Prepend the symlink dir so it shadows the real compilers.
+    export PATH="${_CCACHE_DIR}:${PATH}"
+
+    # CCACHE_BASEDIR normalizes absolute paths to relative, maximizing cache
+    # hits across builds in slightly different directories.
+    export CCACHE_BASEDIR="${VLLM_DIR}"
+
+    # 50 GB cache — HIP object files from AITER and PyTorch are large.
+    export CCACHE_MAXSIZE="50G"
+
+    # Disable ccache for preprocessor-only invocations (cmake compiler probes).
+    # This avoids polluting the cache with tiny throwaway compilations.
+    export CCACHE_NOCPP2=1
+fi
+unset _CCACHE_DIR
 
 # Polly (polyhedral loop optimizer): enabled if the built clang supports it.
 # Polly restructures loop nests for cache locality — critical for Strix Halo's
@@ -167,6 +209,22 @@ unset _ROCM_VERSION_FILE
 # (chip_info.py enum 13, fwd_prefill.py RDNA 3.5 tuning: BLOCK_M=32,
 # BLOCK_N=32, waves_per_eu=2). Build status recorded by build-vllm.sh.
 
+# CK_DIR: Composable Kernel source tree for AITER JIT compilation.
+# AITER's MHA kernels (mha_varlen_fwd, mha_fwd_splitkv) require CK tile headers
+# and the generate.py codegen script at runtime. The pip-installed aiter wheel
+# does NOT include the CK 3rdparty submodule — only the ck_helper shim.
+# We point CK_DIR to the CK source shipped with PyTorch's AITER 3rdparty,
+# which has the complete example/ck_tile/01_fmha/ codegen (generate.py,
+# fmha_fwd.hpp, mask.hpp).
+_CK_PYTORCH="${VLLM_DIR}/pytorch/third_party/aiter/3rdparty/composable_kernel"
+_CK_THEROCK="${VLLM_DIR}/therock/rocm-libraries/projects/composablekernel"
+if [[ -d "${_CK_PYTORCH}/example/ck_tile/01_fmha" ]]; then
+    export CK_DIR="${_CK_PYTORCH}"
+elif [[ -d "${_CK_THEROCK}/example/ck_tile/01_fmha" ]]; then
+    export CK_DIR="${_CK_THEROCK}"
+fi
+unset _CK_PYTORCH _CK_THEROCK
+
 _AITER_STATUS_FILE="${VLLM_DIR}/.aiter-status"
 if [[ -f "${_AITER_STATUS_FILE}" ]]; then
     _AITER_STATUS="$(cat "${_AITER_STATUS_FILE}")"
@@ -180,6 +238,9 @@ if [[ -f "${_AITER_STATUS_FILE}" ]]; then
         export VLLM_ROCM_USE_AITER_LINEAR=1
         export VLLM_ROCM_USE_AITER_MOE=1
         export VLLM_ROCM_USE_AITER_RMSNORM=1
+        # AITER MHA (CK tile backend): dispatches through flash_attn_varlen_func
+        # → mha_varlen_fwd, a CK-tile kernel JIT-compiled at runtime.
+        # Requires aiter wheel built against matching CK source (see CK_DIR).
         export VLLM_ROCM_USE_AITER_MHA=1
         export VLLM_ROCM_USE_AITER_TRITON_GEMM=1
 
@@ -187,9 +248,8 @@ if [[ -f "${_AITER_STATUS_FILE}" ]]; then
         # (aiter.ops.triton.fused_kv_cache.fused_qk_rope_reshape_and_cache)
         export VLLM_ROCM_USE_AITER_TRITON_ROPE=1
 
-        # Unified attention — verified on gfx1151 via direct Triton JIT test
-        # (aiter.ops.triton.unified_attention) Used for speculative decoding
-        # and multi-token decode paths.
+        # Unified attention: dispatches through AITER's CK-tile MHA path.
+        # vLLM envs.py defaults this to False; we enable it explicitly.
         export VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
 
         # Fused shared expert MoE — uses AITER native fmoe_g1u1 kernels.
@@ -234,7 +294,37 @@ export TORCH_BLAS_PREFER_HIPBLASLT=1
 # persists tuning data across vLLM restarts — critical for Strix Halo where the
 # default kernel selection often picks suboptimal shapes for the 40-CU iGPU.
 export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx1151.csv"
+export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx11510.csv"
+
+# torch.inductor codegen bug: AttrsDescriptor.__repr__() in triton/backends/
+# compiler.py produces invalid Python (angle-bracket object repr) in generated
+# Triton source files. Fixed by build-vllm.sh Patch 5 which adds a proper
+# __repr__ using the existing to_dict()/from_dict() round-trip.
+# TORCH_COMPILE_DISABLE was previously set here as a workaround for Triton
+# instruction scheduler bugs on gfx1151. With Patch 5 (AttrsDescriptor) and
+# Patch 6 (duplicate pattern registration) in build-vllm.sh, torch.compile
+# with Inductor now works correctly on gfx1151 — all AITER optimizations
+# active, verified with Qwen2.5-7B-Instruct inference.
+unset TORCH_COMPILE_DISABLE 2>/dev/null || true
+
+# AOTriton experimental: enables gfx11xx experimental kernel paths in the
+# AOTriton (Ahead-Of-Time Triton) library. Required for Strix Halo gfx1151.
+export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+
+# =============================================================================
+# MIOpen Configuration
+# =============================================================================
+# MIOpen (AMD's convolution/GEMM library) algorithm selection strategy.
+# MIOPEN_FIND_MODE controls how MIOpen searches for optimal kernels:
+#   1 = NORMAL:      Exhaustive search (very slow on first run per shape)
+#   2 = FAST:        Heuristic-only (fast startup, good enough with TunableOp)
+#   3 = HYBRID:      Check find-db, fall back to exhaustive search on miss
+#   4 = FAST_HYBRID: Check find-db, fall back to heuristic on miss
+#
+# We use FAST because TunableOp already handles GEMM autotuning at the PyTorch
+# level. MIOpen's exhaustive search is redundant and adds minutes to CUDA graph
+# warmup (51 batch sizes × multiple kernel shapes per size).
+export MIOPEN_FIND_MODE=2
 
 # =============================================================================
 # Triton Compiler Optimization
@@ -246,6 +336,47 @@ export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx1151.csv"
 # coalescing behavior on RDNA 3.5's memory controller, particularly for the
 # strided access patterns common in attention and GEMM kernels.
 export AMDGCN_USE_BUFFER_OPS=1
+
+# =============================================================================
+# Rust Compiler Flags (Zen 5)
+# =============================================================================
+# target-cpu=znver5 explicitly (not 'native') because Rust's native detection
+# has a bug where it identifies znver5 but only enables SSE2. Explicit znver5
+# gives us all 40+ target features: AVX-512{F,BW,DQ,VL,VNNI,IFMA,VBMI,VBMI2,
+# BITALG,BF16,VPOPCNTDQ,VP2INTERSECT}, VAES, VPCLMULQDQ, GFNI, SHA.
+#
+# Do NOT add -C lto=thin — maturin adds -C embed-bitcode=no which conflicts.
+export RUSTFLAGS="-C target-cpu=znver5 -C opt-level=3"
+
+# =============================================================================
+# AOTriton Install Prefix
+# =============================================================================
+# AOTriton installs to the unified LOCAL_PREFIX alongside TheRock and AOCL.
+# PyTorch's cmake discovery and vLLM's build both need this to find
+# libaotriton.so and the AOTriton cmake config.
+export AOTRITON_INSTALL_DIR="${_LOCAL_PREFIX}"
+
+# =============================================================================
+# Lemonade / llama.cpp Configuration
+# =============================================================================
+# Lemonade wraps llama.cpp (GPU/CPU), FLM (NPU), and ONNX behind an
+# OpenAI-compatible API. In-place builds under the llama.cpp source tree.
+
+# ROCm backend (primary — hipBLAS, best prefill <32K context)
+_LLAMACPP_ROCM="${LLAMACPP_SRC}/build-rocm"
+if [[ -d "${_LLAMACPP_ROCM}" ]]; then
+    export LEMONADE_LLAMACPP_DIR="${_LLAMACPP_ROCM}"
+    export PATH="${_LLAMACPP_ROCM}:${PATH}"
+    export LD_LIBRARY_PATH="${_LLAMACPP_ROCM}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+# Vulkan backend (best generation speed + prefill >32K context on gfx1151)
+_LLAMACPP_VULKAN="${LLAMACPP_SRC}/build-vulkan"
+if [[ -d "${_LLAMACPP_VULKAN}" ]]; then
+    export LEMONADE_LLAMACPP_VULKAN_DIR="${_LLAMACPP_VULKAN}"
+    export LD_LIBRARY_PATH="${_LLAMACPP_VULKAN}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+unset _LLAMACPP_ROCM _LLAMACPP_VULKAN
 
 # =============================================================================
 # Virtual Environment Activation
@@ -274,6 +405,13 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    CXX:              ${CXX}"
     echo "    CFLAGS:           ${CFLAGS}"
     echo "    LDFLAGS:          ${LDFLAGS}"
+    if command -v ccache &>/dev/null && [[ -z "${VLLM_NO_CCACHE:-}" ]]; then
+        echo "    ccache:           active ($(ccache --version | head -1))"
+        echo "    CCACHE_MAXSIZE:   ${CCACHE_MAXSIZE:-default}"
+        echo "    CCACHE_DIR:       ${CCACHE_DIR:-~/.cache/ccache}"
+    else
+        echo "    ccache:           not available"
+    fi
     echo ""
     echo "  GPU / ROCm:"
     echo "    ROCM_ARCH:        ${PYTORCH_ROCM_ARCH}"
@@ -288,11 +426,12 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    Flash Attn Triton: ${FLASH_ATTENTION_TRITON_AMD_ENABLE}"
     echo ""
     echo "  AITER Optimization:"
+    echo "    CK_DIR:          ${CK_DIR:-<not set — MHA JIT will fail>}"
     echo "    Master switch:    ${VLLM_ROCM_USE_AITER:-disabled}"
     echo "    Linear layers:    ${VLLM_ROCM_USE_AITER_LINEAR:-default}"
     echo "    MoE kernels:      ${VLLM_ROCM_USE_AITER_MOE:-default}"
     echo "    RMSNorm:          ${VLLM_ROCM_USE_AITER_RMSNORM:-default}"
-    echo "    MHA (attention):  ${VLLM_ROCM_USE_AITER_MHA:-default}"
+    echo "    MHA (CK tile):    ${VLLM_ROCM_USE_AITER_MHA:-disabled (CK ABI mismatch)}"
     echo "    Triton GEMM:      ${VLLM_ROCM_USE_AITER_TRITON_GEMM:-default}"
     echo "    Triton ROPE:      ${VLLM_ROCM_USE_AITER_TRITON_ROPE:-disabled}"
     echo "    Unified attn:     ${VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:-disabled}"
@@ -304,8 +443,28 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    TunableOp:        ${PYTORCH_TUNABLEOP_ENABLED:-disabled}"
     echo "    TunableOp file:   ${PYTORCH_TUNABLEOP_FILENAME:-<not set>}"
     echo ""
+    echo "  Rust:"
+    echo "    RUSTFLAGS:        ${RUSTFLAGS}"
+    echo ""
     echo "  Triton Compiler:"
     echo "    Buffer ops:       ${AMDGCN_USE_BUFFER_OPS:-disabled}"
+    echo ""
+    echo "  Lemonade / llama.cpp:"
+    echo "    ROCm backend:     ${LEMONADE_LLAMACPP_DIR:-<not built>}"
+    echo "    Vulkan backend:   ${LEMONADE_LLAMACPP_VULKAN_DIR:-<not built>}"
+    echo "    llama-server:     $(command -v llama-server 2>/dev/null || echo 'not in PATH')"
+    echo "    llama-bench:      $(command -v llama-bench 2>/dev/null || echo 'not in PATH')"
+    echo "    llama-quantize:   $(command -v llama-quantize 2>/dev/null || echo 'not in PATH')"
+    if [[ -f "${LEMONADE_LLAMACPP_DIR:-.}/.env" ]]; then
+        echo "    ROCm .env:        present"
+    else
+        echo "    ROCm .env:        not found"
+    fi
+    if [[ -f "${LEMONADE_LLAMACPP_VULKAN_DIR:-.}/.env" ]]; then
+        echo "    Vulkan .env:      present"
+    else
+        echo "    Vulkan .env:      not found"
+    fi
     echo ""
     echo "  Runtime:"
     echo "    VENV active:      $(command -v python 2>/dev/null || echo 'no')"

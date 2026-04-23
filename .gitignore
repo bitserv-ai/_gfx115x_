@@ -1,0 +1,45 @@
+# =============================================================================
+# Git Ignore — _gfx115x_
+# =============================================================================
+
+# Runtime artifacts
+.env
+*.log
+*.pid
+.vllm-*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.so
+*.o
+-.o
+
+# Coverage / testing
+.coverage
+.tox/
+htmlcov/
+
+# Node.js (if any web UI builds)
+node_modules/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing — benchmarks, results (DO NOT commit)
+testing/

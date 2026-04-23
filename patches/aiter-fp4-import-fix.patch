@@ -1,0 +1,19 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/_aiter_ops.py b/vllm/_aiter_ops.py
+index 1111111..2222222 100644
+--- a/vllm/_aiter_ops.py
++++ b/vllm/_aiter_ops.py
+@@ -1235,7 +1235,7 @@ class AiterConfig:
+         from vllm.platforms.rocm import on_gfx9
+ 
+-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
++        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx9()
+ 
+     @classmethod
+@@ -1242,7 +1242,7 @@ class AiterConfig:
+         from vllm.platforms.rocm import on_gfx9
+ 
+-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
++        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx9()
+ 
+     @classmethod

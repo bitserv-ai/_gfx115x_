@@ -19,30 +19,15 @@ set -euo pipefail
 _SCRIPT_REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 _SCRIPT_DIR="$(cd "$(dirname "$_SCRIPT_REAL_PATH")" && pwd)"
 
-# Portable: try platform layout, fall back to co-located files.
-_COMMON_SH="${_SCRIPT_DIR}/../lib/sh/common.sh"
-if [[ -f "${_COMMON_SH}" ]]; then
-    # shellcheck source=../lib/sh/common.sh
-    source "${_COMMON_SH}"
-else
-    info()    { printf '  \033[1;34minfo\033[0m  %s\n' "$*"; }
-    success() { printf '  \033[1;32m  ok\033[0m  %s\n' "$*"; }
-    warn()    { printf '  \033[1;33mwarn\033[0m  %s\n' "$*" >&2; }
-    error()   { printf '  \033[1;31m err\033[0m  %s\n' "$*" >&2; }
-    die()     { error "$@"; exit 1; }
-fi
-unset _COMMON_SH
+# Source shared helpers (logging, section headers, prerequisite checks).
+# shellcheck source=common.sh
+source "${_SCRIPT_DIR}/common.sh"
 
-_HELPERS="${_SCRIPT_DIR}/../lib/sh/vllm-runtime-helpers.sh"
-[[ -f "${_HELPERS}" ]] || _HELPERS="${_SCRIPT_DIR}/vllm-runtime-helpers.sh"
-# shellcheck source=../lib/sh/vllm-runtime-helpers.sh
-source "${_HELPERS}"
-unset _HELPERS
+# shellcheck source=vllm-runtime-helpers.sh
+source "${_SCRIPT_DIR}/vllm-runtime-helpers.sh"
 
-PLATFORM_DIR="${_SCRIPT_DIR}/.."
-[[ -d "${PLATFORM_DIR}/lib" ]] || PLATFORM_DIR="${_SCRIPT_DIR}"
-ENV_FILE="${PLATFORM_DIR}/../.env"
-[[ -f "${ENV_FILE}" ]] || ENV_FILE="${_SCRIPT_DIR}/.env"
+PLATFORM_DIR="${_SCRIPT_DIR}"
+ENV_FILE="${_SCRIPT_DIR}/.env"
 
 unset _SCRIPT_REAL_PATH _SCRIPT_DIR
 

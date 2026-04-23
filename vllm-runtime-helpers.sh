@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Blackcat Informatics Inc.
+# Copyright 2026 Blackcat Informatics Inc. / 2026 bitserv-ai
 # SPDX-License-Identifier: MIT
 #
 # vllm-runtime-helpers.sh - Runtime management helpers for vLLM instances
@@ -16,7 +16,7 @@
 #   - .env must be loaded (provides VLLM_ROLES and per-role config)
 #
 # Usage:
-#   source lib/sh/vllm-runtime-helpers.sh
+#   source "$(dirname "${BASH_SOURCE[0]}")/vllm-runtime-helpers.sh"
 
 # Guard: common.sh must be sourced first
 if ! declare -f info &>/dev/null; then
@@ -234,25 +234,32 @@ vllm_query_models() {
 # GPU Memory
 # =============================================================================
 
-# Get total GTT memory in megabytes from rocm-smi.
+# Get total allocatable GPU memory in megabytes from rocm-smi.
 #
-# On UMA architectures (Strix Halo), GTT is the GPU-accessible memory pool.
-# This is the denominator for gpu-memory-utilization calculations.
+# Reports VRAM (BIOS carve-out) only. On UMA architectures (Strix Halo),
+# hipMalloc can only allocate from the 48 GB VRAM carve-out — the GTT pool
+# (~25 GB) is kernel-managed and not accessible via hipMalloc. Including GTT
+# in the divisor would produce an artificially low utilization fraction,
+# causing vLLM to under-allocate and run out of KV-cache memory.
+#
+# For llama.cpp Vulkan (RADV), which CAN use GTT, use the vanilla/llamacpp
+# backend configuration with explicit GPU_MEMORY_MB targeting VRAM+GTT instead.
+#
+# Handles multi-GPU systems by summing VRAM across all devices.
 #
 # Outputs:
-#   Total GTT memory in MB
+#   Total allocatable GPU memory (VRAM only) in MB
 #
 # Returns:
 #   0 on success, dies if rocm-smi query fails
-vllm_gtt_total_mb() {
-    local gtt_bytes
-    gtt_bytes="$(rocm-smi --showmeminfo gtt 2>/dev/null \
-        | grep "GTT Total Memory" \
-        | grep -oP '\d+$')"
-    if [[ -z "${gtt_bytes}" ]]; then
-        die "Cannot query GTT memory from rocm-smi. Is ROCm installed?"
+vllm_gpu_total_mb() {
+    local vram_sum
+    vram_sum="$(rocm-smi --showmeminfo vram 2>/dev/null | grep "VRAM Total Memory" | grep -oP '\d+$' | paste -sd+ | bc 2>/dev/null || echo 0)"
+
+    if [[ "${vram_sum}" -eq 0 ]]; then
+        die "Cannot query VRAM from rocm-smi. Is ROCm installed?"
     fi
-    echo $(( gtt_bytes / 1048576 ))
+    echo $(( vram_sum / 1048576 ))
 }
 
 # Convert megabytes to a gpu-memory-utilization fraction (0.0-1.0).
@@ -316,6 +323,7 @@ vllm_require_roles() {
 # Useful for debugging performance issues and verifying configuration.
 vllm_log_optimization_state() {
     info "Optimization state:"
+    info "  V1 multiprocessing:  ${VLLM_ENABLE_V1_MULTIPROCESSING:-1 (default)}"
     info "  AITER master:       ${VLLM_ROCM_USE_AITER:-disabled}"
     info "  AITER linear:       ${VLLM_ROCM_USE_AITER_LINEAR:-default}"
     info "  AITER MOE:          ${VLLM_ROCM_USE_AITER_MOE:-default}"
@@ -332,4 +340,51 @@ vllm_log_optimization_state() {
     info "  Buffer ops:         ${AMDGCN_USE_BUFFER_OPS:-disabled}"
     info "  HSA GFX override:   ${HSA_OVERRIDE_GFX_VERSION:-not set}"
     info "  ROCm arch:          ${PYTORCH_ROCM_ARCH:-not set}"
+}
+
+# =============================================================================
+# Startup Failure Diagnostics
+# =============================================================================
+
+# Print detailed diagnostics when a vLLM instance fails to start.
+#
+# Shows whether the process died or timed out, the last 50 lines of the
+# log file, and attempts to diagnose common failure patterns (OOM, HIP
+# errors, import errors, port conflicts).
+#
+# Args:
+#   log_file     - Path to the vLLM instance log file
+#   instance_pid - PID of the vLLM process
+vllm_print_startup_failure_details() {
+    local log_file="$1"
+    local instance_pid="$2"
+
+    if ! kill -0 "${instance_pid}" 2>/dev/null; then
+        error "Process died during startup (PID ${instance_pid})"
+    else
+        error "Health check timed out — process alive but not responding"
+    fi
+
+    error "Log file: ${log_file}"
+    error "--- Last 50 lines ---"
+    tail -50 "${log_file}" >&2
+
+    local log_tail
+    log_tail="$(tail -200 "${log_file}" 2>/dev/null)" || true
+
+    if echo "${log_tail}" | grep -qi "out of memory\|OOM\|CUDA out of memory\|Memory allocation failed"; then
+        error "DIAGNOSIS: Out of memory. Reduce model size or gpu-memory-utilization."
+    fi
+    if echo "${log_tail}" | grep -qi "hipError\|ROCBLAS\|HSA error\|amdgpu"; then
+        error "DIAGNOSIS: ROCm/HIP error. Check ROCm installation and HSA_OVERRIDE_GFX_VERSION."
+    fi
+    if echo "${log_tail}" | grep -qi "ModuleNotFoundError\|ImportError"; then
+        error "DIAGNOSIS: Python import error. Check venv activation and dependencies."
+    fi
+    if echo "${log_tail}" | grep -qi "port.*already in use\|Address already in use"; then
+        error "DIAGNOSIS: Port conflict. Another process is using this port."
+    fi
+    if echo "${log_tail}" | grep -qi "Permission denied\|permission denied"; then
+        error "DIAGNOSIS: Permission denied. Check file ownership and directory permissions."
+    fi
 }
