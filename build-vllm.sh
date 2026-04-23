@@ -565,18 +565,25 @@ clone_pkg() {
             fi
         fi
 
-        # Fetch and update
-        local pull_branch="${branch:-$(git branch --show-current)}"
-        git fetch origin "${pull_branch}"
-
-        # Switch branches if needed
+        # Update only the top-level repo here. Recursive pulls respect user git
+        # config (e.g. pull.rebase=true, submodule.recurse=true) and can leave
+        # dependency submodules in conflicted rebases. We sync submodules
+        # explicitly below after the superproject is updated.
         local current_branch
         current_branch="$(git branch --show-current)"
+        local pull_branch="${branch:-${current_branch}}"
+        if [[ -z "${pull_branch}" ]]; then
+            die "Cannot update ${description}: repository is detached HEAD and no branch is configured."
+        fi
+        git -c submodule.recurse=false fetch --no-recurse-submodules origin "${pull_branch}"
+
+        # Switch branches if needed
         if [[ -n "${branch}" && "${current_branch}" != "${branch}" ]]; then
             info "Switching to ${branch} branch..."
             git checkout "${branch}"
         fi
-        git pull origin "${pull_branch}"
+        git -c pull.rebase=false -c submodule.recurse=false \
+            pull --ff-only --no-recurse-submodules origin "${pull_branch}"
 
         # Checkout specific commit if pinned (reproducibility lock)
         if [[ -n "${commit}" ]]; then
@@ -587,6 +594,7 @@ clone_pkg() {
         # Update submodules if recursive
         if [[ "${is_recursive}" == "true" ]]; then
             info "Updating submodules..."
+            git submodule sync --recursive
             git submodule update --init --recursive
         fi
 
@@ -3538,6 +3546,37 @@ warmup_aiter_jit() {
     fi
     info "AITER JIT directory: ${jit_dir}"
 
+    # AITER uses PyTorch's FileBaton, which waits forever if a prior run
+    # crashed and left lock_* files behind. Clear any dead baton files before
+    # starting the serial pre-warm loop.
+    local jit_build_dir="${jit_dir}/build"
+    if [[ -d "${jit_build_dir}" ]]; then
+        local -a stale_jit_locks=()
+        local _lock_path=""
+        while IFS= read -r -d '' _lock_path; do
+            if command -v lsof >/dev/null 2>&1; then
+                if lsof -t -- "${_lock_path}" >/dev/null 2>&1; then
+                    continue
+                fi
+            elif command -v fuser >/dev/null 2>&1; then
+                if fuser "${_lock_path}" >/dev/null 2>&1; then
+                    continue
+                fi
+            fi
+            stale_jit_locks+=("${_lock_path}")
+        done < <(
+            find "${jit_build_dir}" -type f \
+                \( -name 'lock_*' -o -name 'lock' \) \
+                -print0 2>/dev/null
+        )
+
+        if (( ${#stale_jit_locks[@]} > 0 )); then
+            warn "Removing ${#stale_jit_locks[@]} stale AITER JIT lock files"
+            printf '  stale lock: %s\n' "${stale_jit_locks[@]}"
+            rm -f -- "${stale_jit_locks[@]}"
+        fi
+    fi
+
     # Read the CDNA-only skip list from YAML. These modules use ISA instructions
     # that don't exist on RDNA 3.5 and will never compile on gfx1151. Skipping
     # them avoids wasting ~2.5 hours on guaranteed failures (module_mha_bwd and
@@ -3818,6 +3857,7 @@ print('PASS')
         # Force non-interactive one-shot execution.
         # --no-conversation: prevents auto-enabling chat mode.
         # --single-turn: forces exit after the first response.
+        # --simple-io: disables PTY-backed output, avoids banner/prompt noise.
         if timeout --kill-after 10 120 "${LLAMACPP_INSTALL_DIR}/llama-cli" \
             -m "${gguf_path}" \
             --prompt "${test_prompt}" \
@@ -3826,15 +3866,20 @@ print('PASS')
             --no-display-prompt \
             --single-turn \
             --no-conversation \
+            --simple-io \
             -ngl 99 \
             --log-disable \
             < /dev/null > "${_rocm_tmp}" 2>/dev/null; then
-            # ANSI cleanup, CR removal, filter prompt lines, Spaced Newlines, Trim, Safe UTF-8 cut.
-            _rocm_output="$(sed 's/\x1b\[[0-9;]*m//g' "${_rocm_tmp}" \
-                | tr -d '\r' \
-                | sed '/^[[:space:]]*>[[:space:]]*$/d' \
-                | tr '\n' ' ' \
-                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            # Isolate the assistant reply between the prompt line and perf footer.
+            _rocm_output="$(printf '%s\n' "$(sed 's/\x1b\[[0-9;]*m//g' "${_rocm_tmp}")" \
+                | tr -d '\r\010' \
+                | awk '
+BEGIN { capture=0 }
+/^> / { capture=1; next }
+/^\[ Prompt:/ { capture=0 }
+/^Exiting\.\.\.$/ { capture=0 }
+capture { print }
+' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
                 | cut -c1-200)" || true
             rm -f "${_rocm_tmp}"
             
@@ -3873,6 +3918,7 @@ print('PASS')
         # Force non-interactive one-shot execution (Vulkan).
         # --no-conversation: prevents auto-enabling chat mode.
         # --single-turn: forces exit after the first response.
+        # --simple-io: disables PTY-backed output, avoids banner/prompt noise.
         if timeout --kill-after 10 120 "${LLAMACPP_VULKAN_DIR}/llama-cli" \
             -m "${gguf_path}" \
             --prompt "${test_prompt}" \
@@ -3881,14 +3927,19 @@ print('PASS')
             --no-display-prompt \
             --single-turn \
             --no-conversation \
+            --simple-io \
             --log-disable \
             < /dev/null > "${_vulkan_tmp}" 2>/dev/null; then
-            # ANSI cleanup, CR removal, filter prompt lines, Spaced Newlines, Trim, Safe UTF-8 cut.
-            _vulkan_output="$(sed 's/\x1b\[[0-9;]*m//g' "${_vulkan_tmp}" \
-                | tr -d '\r' \
-                | sed '/^[[:space:]]*>[[:space:]]*$/d' \
-                | tr '\n' ' ' \
-                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            # Isolate the assistant reply between the prompt line and perf footer.
+            _vulkan_output="$(printf '%s\n' "$(sed 's/\x1b\[[0-9;]*m//g' "${_vulkan_tmp}")" \
+                | tr -d '\r\010' \
+                | awk '
+BEGIN { capture=0 }
+/^> / { capture=1; next }
+/^\[ Prompt:/ { capture=0 }
+/^Exiting\.\.\.$/ { capture=0 }
+capture { print }
+' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
                 | cut -c1-200)" || true
             rm -f "${_vulkan_tmp}"
             

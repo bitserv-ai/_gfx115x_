@@ -40,6 +40,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (BUILD-FIXES #97, YAML patch #34).
 - **FP8 E5M2 C++ Typen** (`quant_utils.cuh`): `.patch`-File verfügbar,
   vorher untracked live-edit (BUILD-FIXES #92/#93, YAML patch #35).
+- **`clone_pkg()` submodule pull protection** (BUILD-FIXES #98):
+  `--no-recurse-submodules`, `--ff-only`, detached-HEAD guard,
+  explicit `git submodule sync --recursive`. Cherry-picked from
+  `paudley/ai-notes` `b453c33`.
+- **AITER JIT stale FileBaton lock cleanup** (BUILD-FIXES #99):
+  Auto-removes orphaned `lock_*` files before pre-warm. Cherry-picked
+  from `paudley/ai-notes` `b453c33`.
+- **llama.cpp smoke test `--simple-io`** (BUILD-FIXES #100):
+  Adds `--simple-io` flag and awk-based response extraction for both
+  ROCm and Vulkan backends. Cherry-picked from `paudley/ai-notes`
+  `b453c33`.
 
 ## [0.3.0] - 2026-04-22
 

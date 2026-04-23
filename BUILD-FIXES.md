@@ -1708,6 +1708,55 @@ FP4 which is not supported on RDNA 3.5.
 
 **Upstream status**: Not yet reported upstream (as of vLLM commit 719735d6c).
 
+### 98. `clone_pkg()` — recursive submodule pull corrupts working tree
+
+**Symptom**: During `build-vllm.sh` package updates, `git pull` with user git
+config (`pull.rebase=true` or `submodule.recurse=true`) can leave dependency
+submodules in conflicted rebases or detached HEAD states. Detached-HEAD repos
+with no branch configured silently fail to update.
+
+**Root cause**: The original `clone_pkg()` used bare `git fetch` and `git pull`
+without isolating the superproject update from submodule recursion, and had
+no guard against detached-HEAD state when no branch was configured.
+
+**Fix**: Fetch and pull with `--no-recurse-submodules` and `--ff-only` to
+prevent accidental submodule rebases. Guard detached-HEAD with an explicit
+error. Add `git submodule sync --recursive` before `update --init` to ensure
+remote URLs are correct after branch switches.
+
+**Upstream**: Cherry-picked from `paudley/ai-notes` commit `b453c33`.
+
+### 99. AITER JIT stale FileBaton locks block pre-warm
+
+**Symptom**: After a crashed AITER JIT compilation, subsequent `warmup_aiter_jit`
+runs hang indefinitely because PyTorch's `FileBaton` waits on orphaned `lock_*`
+files in the JIT build directory.
+
+**Root cause**: `FileBaton` uses filesystem-level locks for serial compilation.
+If the process crashes, lock files remain and the next run deadlocks.
+
+**Fix**: Before the serial pre-warm loop, scan `${jit_dir}/build` for
+`lock_*` and `lock` files, check with `lsof`/`fuser` whether any live process
+holds them, and remove orphaned locks.
+
+**Upstream**: Cherry-picked from `paudley/ai-notes` commit `b453c33`.
+
+### 100. llama.cpp smoke test output extraction unreliable with PTY mode
+
+**Symptom**: Smoke tests for llama.cpp ROCm and Vulkan backends sometimes
+report empty output even though inference succeeded, because `llama-cli`
+in PTY-backed mode emits banner and prompt text that contaminates the output.
+
+**Root cause**: The original sed-based extraction (`sed '/^| *//p'`) assumed
+conversation-formatted output. With PTY mode, `llama-cli` emits extra lines
+that the sed filter cannot cleanly remove.
+
+**Fix**: Add `--simple-io` flag to disable PTY-backed output, and use
+`awk`-based extraction that isolates the assistant reply between the `> `
+prompt line and the `[ Prompt:` performance footer.
+
+**Upstream**: Cherry-picked from `paudley/ai-notes` commit `b453c33`.
+
 ## Runtime Environment Files (Phase I)
 
 The build generates `.env` files for llama.cpp backends used by Lemonade.
