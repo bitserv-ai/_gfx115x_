@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Upstream sync: [`b453c3363aff30d38454f1904a91584baaad889b`](https://github.com/paudley/ai-notes/commit/b453c3363aff30d38454f1904a91584baaad889b)
+from `paudley/ai-notes` (2026-04-22).
+
+Cherry-picked: #98 (clone_pkg hardening), #99 (AITER JIT locks), #100 (smoke test --simple-io).
+Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch pin to master (own branch), warmup pass changes (already handled by our --no-conversation/--log-disable).
+
 ### Added
 
 - **W8A16 Quantisierung**: `quantize_w8a16.py` Skript (llmcompressor + RTN)
