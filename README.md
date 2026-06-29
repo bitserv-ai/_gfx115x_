@@ -232,7 +232,8 @@ all 40+ target features including AVX-512, VAES, VPCLMULQDQ, GFNI, SHA.
 | `vllm-runtime-helpers.sh` | Shared library for start/stop/status scripts |
 | `BUILD-FIXES.md` | Detailed documentation of all build patches and workarounds |
 | `CHANGELOG.md` | Version history and notable changes |
-| `QWEN3-VL-EMBED.md` | Qwen3-VL multimodal embedding deployment notes |
+| `QWEN3-VL-EMBED.md` | Qwen3-VL multimodal embedding and reranking deployment (production) |
+| `QWEN3-INT8-QUANT.md` | INT8 quantization strategy for Qwen3-VL on gfx1151 (engineering deep-dive) |
 
 ## Repo Variants
 

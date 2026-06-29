@@ -1757,6 +1757,90 @@ prompt line and the `[ Prompt:` performance footer.
 
 **Upstream**: Cherry-picked from `paudley/ai-notes` commit `b453c33`.
 
+### 101. ROCm HSA BusyWaitSignal spins 100% CPU per GPU context when idle
+
+**Symptom**: Each `VLLM::EngineCore` subprocess consumes 100% of one CPU core
+even when completely idle (no active requests). For dual-instance setups
+(Embed + Reranker), this wastes 2 cores permanently and keeps iGPU power
+at ~38 W instead of ~5 W idle. llama.cpp/ROCm does NOT exhibit this issue.
+
+**Root cause**: On ROCm, the default HIP device scheduling mode is
+`hipDeviceScheduleSpin`. When PyTorch initializes CUDA and submits the
+first GPU kernel, the HSA runtime creates a persistent `BusyWaitSignal`
+completion polling thread per queue. This thread polls the GPU doorbell
+signal in a tight userspace loop (`wchan=0`, state `R`) and never sleeps,
+even when the GPU has no pending work. The Python-level EngineCore
+backoff patch (BUILD-FIXES #96) correctly puts the main thread to sleep,
+but the HSA C-level thread continues spinning independently.
+
+**Fix**: Call `hipSetDeviceFlags(hipDeviceScheduleBlockingSync)` in
+`vllm/env_override.py` before any HIP/ROCm initialization (i.e., before
+`import torch`). This tells the HSA runtime to use interrupt-based
+(futex) waits instead of busy-polling. The thread then blocks in
+`hrtimer_nanosleep` / `futex_wait` and wakes only when the GPU signals
+completion, consuming ~0% CPU when idle.
+
+**Tested alternatives** (all ineffective):
+- `HSA_ENABLE_SDMA=0`: made spin **worse** (~10× more CPU)
+- `HSA_ENABLE_INTERRUPT=1`: no effect
+- `GPU_MAX_HW_QUEUES=1`: no effect
+- `HSA_MAX_QUEUES=1`: no effect
+- `CUDA_LAUNCH_BLOCKING=1`: no effect
+- `torch.cuda.Event(blocking=True)`: no effect
+
+**Implementation**:
+- `vllm/env_override.py`: Added `hipSetDeviceFlags(0x4)` call guarded by
+  `VLLM_TARGET_DEVICE == "rocm"`, wrapped in try/except for NVIDIA hosts.
+- `patches/env-override-hip-blocking-sync.patch`: Git diff patch file.
+- `vllm-packages.yaml`: Patch entry under `packages.vllm.patches`.
+- **Result**: Idle CPU drops from ~100 ticks/s to ~1 tick/s per EngineCore
+  instance (100× reduction). Power drops from ~38 W to ~5 W.
+
+### 102. Single-GPU distributed init skip (gloo/TCPStore epoll elimination)
+
+**Symptom**: Each EngineCore subprocess spawns ~13 epoll polling threads from
+`torch.distributed.init_process_group(backend="gloo")` and `new_group()` calls,
+even when `world_size=1`. These threads consume ~3% CPU (~2 W) per process
+when completely idle.
+
+**Root cause**: vLLM initializes a full multi-node distributed environment
+(`init_process_group` + TCPStore + multiple `new_group()` calls for TP/PP/DP/EP)
+regardless of `world_size`. On a single GPU, all collective operations
+(`all_reduce`, `broadcast`, `barrier`) are identity operations — there's nothing
+to coordinate — but the TCPStore master and gloo process groups create polling
+threads anyway.
+
+**Fix**: `SingleGPUGroup` class in `parallel_state.py` — a lightweight
+stand-in for `GroupCoordinator` that implements the same public API but all
+collective operations are no-ops (identity for single-rank). Three early-return
+paths skip distributed initialization entirely when `world_size=1`:
+
+1. `init_distributed_environment()`: Skip `init_process_group()`, create
+   `SingleGPUGroup` as the world group, return immediately.
+2. `initialize_model_parallel()`: When `torch.distributed` is not initialized
+   (because step 1 skipped it), create `SingleGPUGroup` instances for TP/PP/DP/
+   DCP/PCP, return immediately.
+3. `gpu_worker.py: init_worker_distributed_environment()`: When
+   `world_size==1`, skip both `init_distributed_environment()` and
+   `ensure_model_parallel_initialized()`, call `initialize_model_parallel()`
+   directly.
+
+Additional guards:
+- `ensure_model_parallel_initialized()`: Handle `SingleGPUGroup` which has no
+  `backend` attribute — fall back to `"gloo"` when `torch.distributed` is not
+  initialized.
+- `uniproc_executor.py`: Skip `dist.all_reduce()` when `cpu_group is None`
+  (single-GPU mode has no CPU process group).
+
+**Result**: Zero epoll threads, zero idle CPU. Thread count per EngineCore:
+101 → 88. Idle power reduction: ~2 W per instance.
+
+**Patch file**: `patches/skip-distributed-single-gpu.patch`
+
+**YAML**: `type: patch` in `vllm-packages.yaml`
+
+**Upstream status**: Not yet reported upstream (as of vLLM commit 719735d6c).
+
 ## Runtime Environment Files (Phase I)
 
 The build generates `.env` files for llama.cpp backends used by Lemonade.

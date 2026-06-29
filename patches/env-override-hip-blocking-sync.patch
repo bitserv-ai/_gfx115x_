@@ -1,0 +1,38 @@
+diff --git a/vllm/env_override.py b/vllm/env_override.py
+index 432300f4c..daa219d84 100644
+--- a/vllm/env_override.py
++++ b/vllm/env_override.py
+@@ -4,6 +4,33 @@
+ import importlib.util
+ import os
+ 
++# BUILD-FIXES #97/#101: Set HIP device scheduling to BlockingSync early.
++# On ROCm (RDNA iGPUs), the default is hipDeviceScheduleSpin which creates
++# a persistent HSA BusyWaitSignal thread consuming 100% of one CPU core per
++# GPU context even when completely idle. BlockingSync uses interrupt-based
++# waits instead, reducing idle CPU from ~1 core to ~0 per instance.
++# Must be called before any HIP/ROCm init (i.e., before `import torch`).
++# Detection: try to load libamdhip64 — if it exists, we are on ROCm.
++# We cannot rely on VLLM_TARGET_DEVICE because spawned EngineCore subprocesses
++# may not inherit that env var.
++try:
++    import ctypes
++    _libhip = ctypes.CDLL("libamdhip64.so.7")
++    _HIP_DEVICE_SCHEDULE_BLOCKING_SYNC = 0x4
++    _ret = _libhip.hipSetDeviceFlags(_HIP_DEVICE_SCHEDULE_BLOCKING_SYNC)
++    if _ret != 0:
++        import logging as _logging
++        _logging.getLogger(__name__).warning(
++            "hipSetDeviceFlags(BlockSync) failed with %d", _ret)
++    del _libhip, _ret
++except Exception:
++    pass
++finally:
++    try:
++        del ctypes
++    except NameError:
++        pass
++
+ 
+ def _get_torch_cuda_version():
+     """Peripheral function to _maybe_set_cuda_compatibility_path().

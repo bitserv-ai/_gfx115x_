@@ -1442,6 +1442,18 @@ packages:
           when EngineCore is idle. Reset immediately on activity.
           Applied idempotently via git apply --reverse --check.
 
+      # 33b. ROCm HSA BusyWaitSignal spin: hipDeviceScheduleBlockingSync (BUILD-FIXES #101)
+      - type: patch
+        path: "${VLLM_DIR}/patches/env-override-hip-blocking-sync.patch"
+        description: >
+          Add hipSetDeviceFlags(hipDeviceScheduleBlockingSync) to
+          vllm/env_override.py before torch import. On ROCm RDNA iGPUs,
+          the default hipDeviceScheduleSpin creates a persistent HSA
+          BusyWaitSignal thread per GPU context consuming 100% of one
+          CPU core even when idle. BlockingSync uses interrupt-based
+          waits, reducing idle CPU from ~1 core to ~0 per instance.
+          Tested: HSA_ENABLE_SDMA=0 worsens; other HSA vars no effect.
+
       # 34. AITER FP4: on_gfx950() not imported (BUILD-FIXES #97)
       - type: patch
         path: "${VLLM_DIR}/patches/aiter-fp4-import-fix.patch"
@@ -1462,6 +1474,20 @@ packages:
           amd/quant_utils.cuh. RDNA 3+ hardware only supports E5M2
           natively — E4M3 causes Triton JIT failures. Requires C++
           extension rebuild after patching.
+
+      # 36. Skip torch.distributed for single-GPU (BUILD-FIXES #102)
+      - type: patch
+        path: "${VLLM_DIR}/patches/skip-distributed-single-gpu.patch"
+        description: >
+          SingleGPUGroup class in parallel_state.py — drop-in replacement
+          for GroupCoordinator when world_size=1. All collective operations
+          are identity no-ops. Early returns in init_distributed_environment()
+          and initialize_model_parallel() skip init_process_group and
+          new_group() entirely. Guard in gpu_worker.py skips distributed
+          init for single-GPU. Guard in uniproc_executor.py skips
+          dist.all_reduce when cpu_group is None. Eliminates ~13 epoll
+          threads per EngineCore, reducing idle CPU from ~3% to ~0% and
+          saving ~2 W per instance.
 
   # ---------------------------------------------------------------------------
   # Phase F: Attention

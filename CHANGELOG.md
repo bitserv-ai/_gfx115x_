@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-29
+
 Upstream sync: [`b453c3363aff30d38454f1904a91584baaad889b`](https://github.com/paudley/ai-notes/commit/b453c3363aff30d38454f1904a91584baaad889b)
 from `paudley/ai-notes` (2026-04-22).
 
@@ -28,20 +30,39 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
 - **Dual-Instance via `.env`**: `VLLM_ROLES=dual`, `VLLM_ROCM_USE_AITER=1`.
 - **Patch Policy** (`AGENTS.md`): Neu → `.patch`-Files, Bestand → inline;
   YAML bleibt Source of Truth.
-- **2 neue `.patch`-Files**:
-  `aiter-fp4-import-fix.patch` (BUILD-FIXES #97),
-  `fp8-e5m2-quant-utils.patch` (BUILD-FIXES #92/#93).
+- **`patches/`-Verzeichnis**: 7 `.patch`-Files ins Repo eingebracht
+  (v0.3.0 hatte keine versionierten Patches):
+  `aiter-fp4-import-fix.patch` (#97),
+  `fp8-e5m2-quant-utils.patch` (#92/#93),
+  `enginecore-idle-backoff.patch` (#96),
+  `env-override-hip-blocking-sync.patch` (#101),
+  `skip-distributed-single-gpu.patch` (#102),
+  `cmake-zen4-only.patch` (#80),
+  `grammar-max-rep-threshold.patch` (#81).
+- **QWEN3-INT8-QUANT.md**: Neues Engineering-Dokument — INT8-Quantisierungs-
+  Strategie (W8A16 Production, W8A8 Failure Analysis, AITER Unlock,
+  Kernel Dispatch, Memory Budget, Performance Benchmarks).
 
 ### Changed
 
-- **QWEN3-VL-EMBED.md**: Vollständig überarbeitet. Neue Abschnitte:
-  AITER Unlock, Dual-Instance, Burn-Test, JIT-Cache, enforce-eager
-  (mandatory on gfx1151), Decision Tree, Runtime-Characteristics.
-- **`.gitignore`**: `testing/` excluded (Benchmark-/Test-Skripte nicht
-  veröffentlicht).
+- **QWEN3-VL-EMBED.md**: Vollständig überarbeitet. Aktuelle Abschnitte:
+  Model Details, vLLM Runtime Adaptations, vLLM Server Configuration,
+  HTTP API Reference, Memory Tuning & Alternative Configurations.
+- **`.gitignore`**: `testing/`, `techdoc/`, `TODO.md`, `drafts/`, `_backup/`
+  unter "bitserv-ai internal" zusammengefasst.
 
 ### Fixed
 
+- **ROCm HSA BusyWaitSignal 100% CPU idle** (BUILD-FIXES #101):
+  `hipSetDeviceFlags(hipDeviceScheduleBlockingSync)` in `env_override.py`
+  before `import torch`. Eliminates persistent HSA polling threads that
+  spin 100% CPU per GPU context even when idle. Idle power ~38 W → ~5 W.
+  `patches/env-override-hip-blocking-sync.patch`.
+- **Single-GPU distributed init skip** (BUILD-FIXES #102):
+  `SingleGPUGroup` avoids creating ~13 epoll threads per EngineCore from
+  `init_process_group("gloo")`/`new_group()` when `world_size=1`. All
+  collective operations are identity no-ops. Zero idle CPU, ~2 W saved per
+  instance. `patches/skip-distributed-single-gpu.patch`.
 - **AITER FP4 Import** (`_aiter_ops.py`): `on_gfx950()` → `on_gfx9()`
   (BUILD-FIXES #97, YAML patch #34).
 - **FP8 E5M2 C++ Typen** (`quant_utils.cuh`): `.patch`-File verfügbar,
@@ -66,7 +87,7 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
 - **ccache integration** (`vllm-env.sh`): Transparently intercepts all compiler invocations (cmake, ninja, pip, AITER JIT) via symlink shadowing (50 GB cache). AITER JIT recompiles drop from ~45 min to ~5 min.
 - **AITER JIT pre-warm & skip list** (step 29b): Compiles all buildable AITER HIP C++ modules ahead of time. 12 CDNA-only modules are skipped declaratively in YAML, saving ~2.5 hours.
 - **Dual-instance Embed + Reranker deployment**: Qwen3-VL-Embedding and Reranker running simultaneously via `VLLM_ROLES`. Added per-role `KV_CACHE_DTYPE`, `CPU_OFFLOAD_GB`, `RUNNER`, `CONVERT`, and `HF_OVERRIDES`.
-- **FP8 KV cache on RDNA 3+ (gfx1151)**: Added `KV_CACHE_DTYPE=fp8_e5m2`, halving KV memory from 144 KB/token (BF16) to 72 KB/token. Enabled via 4-part patch (rocm.py, quant_utils.cuh, convert templates, .env).
+- **FP8 KV cache on RDNA 3+ (gfx1151)** (BUILD-FIXES #92/#93): Added `KV_CACHE_DTYPE=fp8_e5m2`, halving KV memory from 144 KB/token (BF16) to 72 KB/token. Enabled via 4-part patch (rocm.py, quant_utils.cuh, convert templates, .env).
 - **Lemonade + llama.cpp triple-backend** (steps 33-35): Builds llama.cpp for ROCm hipBLAS, Vulkan, and CPU, managed by Lemonade SDK with generated `.env` files.
 - **Multi-distro support & Auto-bootstrapping**: Auto-detects Arch, Ubuntu/Debian, Fedora/RHEL for prerequisites. Auto-installs `uv` and `yq` if missing.
 - **AITER commit documentation**: Recorded PyTorch submodule commit (`9a469a608b2c...`) for full reproducibility.
@@ -77,15 +98,17 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
 - **`vllm-start.sh` uses `setsid`**: Replaced `nohup` for background launch to fix multiprocessing forks on ROCm/gfx1151.
 - **V1 engine CPU weight offloading unlock**: Removed artificial CPU offloading block on non-NVIDIA platforms.
 - **Native ROCm PagedAttention**: Re-enabled fused PagedAttention C++ kernel for RDNA 3.5.
-- **Qwen3-VL-Embedding `CONVERT` correction**: Now uses `CONVERT=embed` to inject `DispatchPooler.for_embedding` (LAST-token pooling + L2 norm).
+- **Qwen3-VL-Embedding `CONVERT` correction** (BUILD-FIXES #90): Now uses `CONVERT=embed` to inject `DispatchPooler.for_embedding` (LAST-token pooling + L2 norm).
 - **All wheels are mandatory**: Build `die`s on wheel failure instead of falling back to PyPI binaries. Old wheels are auto-pruned.
 - **torch version pin relaxation**: `torch == 2.10.0` changed to `>= 2.10.0` to accept source-built wheels.
-- **Embedding/Reranker configuration**: Added `--limit-mm-per-prompt` to disable video input for Qwen3-VL instances (prevents OOM during profiling).
+- **Embedding/Reranker configuration** (BUILD-FIXES #91): Added `--limit-mm-per-prompt` to disable video input for Qwen3-VL instances (prevents OOM during profiling).
+- **`--skip-mm-profiling` per-role flag** (BUILD-FIXES #95): Added `VLLM_<ROLE>_SKIP_MM_PROFILING` config variable in `vllm-start.sh`.
 
 ### Fixed
 
-- **V1 EngineCore zombie & 100% CPU idle busy-loop**: Fixed via `setsid` launch and progressive backoff (0ms → 500ms) in idle loop.
-- **Qwen3VL ViT NaN on gfx1151**: Forced ViT encoder to FP32 to prevent 100% NaN from BF16 overflow in ROCm SDPA/GELU.
+- **V1 EngineCore zombie on ROCm/gfx1151 with `nohup`** (BUILD-FIXES #94): Fixed via `setsid` launch. **V1 EngineCore 100% CPU idle busy-loop** (BUILD-FIXES #96): Fixed via progressive backoff (0ms → 500ms) in idle loop.
+- **ROCm HSA BusyWaitSignal 100% CPU per VLLM::EngineCore**: Fixed via `hipSetDeviceFlags(hipDeviceScheduleBlockingSync)` in `env_override.py`, called before `import torch`. Reduces idle CPU from ~100% per core to ~1%. (BUILD-FIXES #101)
+- **Qwen3VL ViT NaN on gfx1151** (BUILD-FIXES #89): Forced ViT encoder to FP32 to prevent 100% NaN from BF16 overflow in ROCm SDPA/GELU.
 - **`+rms_norm` custom_ops graph partition bug**: Prevented RMSNorm from becoming an opaque barrier in Inductor graph on wave32. Yielded 7.7-8.9x speedup with AITER.
 - **FP8 linear crash on gfx1x**: Fallback to Triton blockscale GEMM to avoid CDNA-only MFMA instructions.
 - **Qwen3.5 hybrid model fixes**: Fixed FLA autotuner page faults, chunk_o BK/BV limits, and KV cache block_size alignment issues on RDNA 3.5.
@@ -127,6 +150,8 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
 - Benchmark results: 1059.8 tok/s (Qwen2.5-0.5B), 391.6 tok/s (Qwen2.5-1.5B).
 - 13 optimized wheel packages (torch, triton, vllm, numpy, etc.).
 
-[Unreleased]: https://github.com/bitserv-ai/_gfx115x_/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bitserv-ai/_gfx115x_/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/bitserv-ai/_gfx115x_/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/bitserv-ai/_gfx115x_/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bitserv-ai/_gfx115x_/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bitserv-ai/_gfx115x_/releases/tag/v0.1.0

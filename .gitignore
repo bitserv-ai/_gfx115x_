@@ -41,5 +41,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# Testing — benchmarks, results (DO NOT commit)
+# bitserv-ai internal (not for publication)
 testing/
+techdoc/
+TODO.md

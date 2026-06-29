@@ -1,0 +1,347 @@
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+index dbe673b33..72693e3cb 100644
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -287,6 +287,151 @@ direct_register_custom_op(
+ )
+ 
+ 
++class SingleGPUGroup:
++    """Lightweight stand-in for GroupCoordinator when world_size=1.
++
++    BUILD-FIXES #103: Avoids creating ~13 epoll threads from
++    torch.distributed.init_process_group / new_group when running
++    on a single GPU, reducing idle CPU by ~3% per process (~2 W).
++
++    Provides the same public API as GroupCoordinator but all
++    collective operations are no-ops (identity) since there is
++    nothing to communicate with.
++    """
++
++    def __init__(self, local_rank: int = 0, *, group_name: str = "world"):
++        self.rank = 0
++        self.ranks = [0]
++        self.world_size = 1
++        self.local_rank = local_rank
++        self.rank_in_group = 0
++        self.cpu_group = None
++        self.device_group = None
++        self.device = torch.device(f"cuda:{local_rank}")
++        self.device_communicator = None
++        self.mq_broadcaster = None
++        self.use_device_communicator = False
++        self.use_custom_op_call = False
++        self.use_cpu_custom_send_recv = False
++        self.unique_name = _get_unique_name(group_name)
++        _register_group(self)
++
++    @property
++    def first_rank(self):
++        return 0
++
++    @property
++    def last_rank(self):
++        return 0
++
++    @property
++    def is_first_rank(self):
++        return True
++
++    @property
++    def is_last_rank(self):
++        return True
++
++    @property
++    def next_rank(self):
++        return 0
++
++    @property
++    def prev_rank(self):
++        return 0
++
++    @contextmanager
++    def graph_capture(self, graph_capture_context=None):
++        yield graph_capture_context
++
++    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
++        return input_
++
++    def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
++        return input_
++
++    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
++        return input_
++
++    def _all_gather_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
++        return input_
++
++    def all_gatherv(self, input_: torch.Tensor, dim: int = -1):
++        return input_
++
++    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
++        return input_
++
++    def reduce_scatterv(self, input_: torch.Tensor, dim: int = -1):
++        return input_
++
++    def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
++        return input_
++
++    def gather(self, input_: torch.Tensor, dst: int = 0, dim: int = -1) -> torch.Tensor:
++        return input_
++
++    def broadcast(self, input_: torch.Tensor, src: int = 0) -> torch.Tensor:
++        return input_
++
++    def broadcast_object(self, obj=None, src: int = 0):
++        return obj
++
++    def broadcast_object_list(self, obj_list, src: int = 0):
++        return obj_list
++
++    def send_object(self, obj, dst: int):
++        raise NotImplementedError("SingleGPUGroup cannot send_object")
++
++    def recv_object(self, src: int):
++        raise NotImplementedError("SingleGPUGroup cannot recv_object")
++
++    def broadcast_tensor_dict(self, tensor_dict, src: int = 0):
++        return tensor_dict
++
++    def send_tensor_dict(self, tensor_dict, dst, group=None):
++        raise NotImplementedError("SingleGPUGroup cannot send_tensor_dict")
++
++    def isend_tensor_dict(self, tensor_dict, dst, group=None):
++        raise NotImplementedError("SingleGPUGroup cannot isend_tensor_dict")
++
++    def recv_tensor_dict(self, src, group=None):
++        raise NotImplementedError("SingleGPUGroup cannot recv_tensor_dict")
++
++    def irecv_tensor_dict(self, src, group=None):
++        raise NotImplementedError("SingleGPUGroup cannot irecv_tensor_dict")
++
++    def barrier(self):
++        pass
++
++    def send(self, tensor: torch.Tensor, dst=None):
++        raise NotImplementedError("SingleGPUGroup cannot send")
++
++    def recv(self, src=None):
++        raise NotImplementedError("SingleGPUGroup cannot recv")
++
++    def destroy(self):
++        pass
++
++    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
++        pass
++
++    def dispatch_router_logits(self, hidden_states, router_logits):
++        return hidden_states, router_logits
++
++    def dispatch(self, hidden_states, *, num_tokens_per_expert=None):
++        return hidden_states, num_tokens_per_expert
++
++    def combine(self, hidden_states, *, num_tokens_per_expert=None):
++        return hidden_states
++
++    def create_mq_broadcaster(self, writer_rank=0, external_writer_handle=None, blocking=True):
++        return None
++
++    def create_single_reader_mq_broadcasters(self, reader_rank_in_group=0, blocking=False):
++        return None
++
++
+ class GroupCoordinator:
+     """
+     PyTorch ProcessGroup wrapper for a group of processes.
+@@ -1353,6 +1498,7 @@ def init_distributed_environment(
+     backend: str = "nccl",
+     timeout: timedelta | None = None,
+ ):
++    global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
+     logger.debug(
+         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
+         world_size,
+@@ -1361,10 +1507,25 @@ def init_distributed_environment(
+         distributed_init_method,
+         backend,
+     )
++    if local_rank == -1:
++        local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
++    # BUILD-FIXES #103: Skip torch.distributed for single-GPU (world_size=1).
++    # init_process_group creates ~13 epoll polling threads even when idle,
++    # consuming ~3% CPU (~2 W). For single-GPU, no collective operations
++    # are needed, so we skip distributed initialization entirely.
+     from vllm.config import get_current_vllm_config_or_none
+ 
+     config = get_current_vllm_config_or_none()
+     enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
++    if world_size == 1 and not enable_elastic_ep:
++        logger.info(
++            "world_size=1, skipping torch.distributed initialization "
++            "(single-GPU mode, no collective operations needed)")
++        if _WORLD is None:
++            _WORLD = SingleGPUGroup(
++                local_rank=local_rank, group_name="world")
++        return
++
+     if (
+         config is not None
+         and config.parallel_config.distributed_executor_backend != "external_launcher"
+@@ -1445,7 +1606,6 @@ def init_distributed_environment(
+         # local rank not set, this usually happens in single-node
+         # setting, where we can use rank as local rank
+         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
+-    global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
+     if enable_elastic_ep:
+         _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
+         return
+@@ -1487,6 +1647,7 @@ def initialize_model_parallel(
+     decode_context_model_parallel_size: int | None = 1,
+     backend: str | None = None,
+ ) -> None:
++    global _TP, _PP, _DP, _DCP, _PCP, _EP, _EPLB
+     """
+     Initialize model parallel groups.
+ 
+@@ -1510,6 +1671,21 @@ def initialize_model_parallel(
+     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
+     ranks 8 to 15 belong to the second box.
+     """
++    # BUILD-FIXES #103: Single-GPU fast path — skip torch.distributed groups
++    # when world_size=1 and dist is not initialized. This avoids creating
++    # ~13 epoll threads from gloo/TCPStore that consume ~3% CPU (~2 W) idle.
++    if not torch.distributed.is_initialized():
++        local_rank = 0
++        _TP = SingleGPUGroup(local_rank=local_rank, group_name="tp")
++        _PP = SingleGPUGroup(local_rank=local_rank, group_name="pp")
++        _DCP = SingleGPUGroup(local_rank=local_rank, group_name="dcp")
++        _PCP = SingleGPUGroup(local_rank=local_rank, group_name="pcp")
++        _DP = SingleGPUGroup(local_rank=local_rank, group_name="dp")
++        logger.info(
++            "Initialized single-GPU model parallel groups (no "
++            "torch.distributed)")
++        return
++
+     # Get world size and rank. Ensure some consistencies.
+     assert torch.distributed.is_initialized()
+ 
+@@ -1564,7 +1740,6 @@ def initialize_model_parallel(
+     )  # noqa
+ 
+     # Build the tensor model-parallel groups.
+-    global _TP
+     assert _TP is None, "tensor model parallel group is already initialized"
+     group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+     group_ranks = [x.tolist() for x in group_ranks]
+@@ -1581,7 +1756,6 @@ def initialize_model_parallel(
+     )
+ 
+     # Build the DCP model-parallel groups.
+-    global _DCP
+     assert _DCP is None, "decode context model parallel group is already initialized"
+     # Note(hc): In the current implementation of decode context parallel,
+     # dcp_size must not exceed tp_size, because the world size does not
+@@ -1602,7 +1776,6 @@ def initialize_model_parallel(
+         group_name="dcp",
+     )
+ 
+-    global _PCP
+     assert _PCP is None, "prefill context parallel group is already initialized"
+     group_ranks = (
+         all_ranks.transpose(3, 4)
+@@ -1622,7 +1795,6 @@ def initialize_model_parallel(
+     )
+ 
+     # Build the pipeline model-parallel groups.
+-    global _PP
+     assert _PP is None, "pipeline model parallel group is already initialized"
+     group_ranks = (
+         all_ranks.transpose(2, 4).reshape(-1, pipeline_model_parallel_size).unbind(0)
+@@ -1639,7 +1811,6 @@ def initialize_model_parallel(
+         group_ranks, get_world_group().local_rank, backend, group_name="pp"
+     )
+ 
+-    global _DP
+     assert _DP is None, "data parallel group is already initialized"
+     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
+     group_ranks = [x.tolist() for x in group_ranks]
+@@ -1656,7 +1827,6 @@ def initialize_model_parallel(
+             group_ranks, get_world_group().local_rank, backend, group_name="dp"
+         )
+ 
+-    global _EP
+     assert _EP is None, "expert parallel group is already initialized"
+     # Don't create EP group for dense models.
+     if config.model_config is None or config.model_config.is_moe:
+@@ -1688,7 +1858,6 @@ def initialize_model_parallel(
+         # This is a separate process group to isolate EPLB communications
+         # from MoE forward pass collectives and prevent deadlocks when
+         # using torch.distributed in execution with torch.distributed in EPLB.
+-        global _EPLB
+         assert _EPLB is None, "EPLB group is already initialized"
+         if (
+             config is not None
+@@ -1740,10 +1909,13 @@ def ensure_model_parallel_initialized(
+     values if the model parallel groups are initialized.
+     """
+     world_group = get_world_group()
++    # BUILD-FIXES #103: SingleGPUGroup has no backend attribute.
+     if hasattr(world_group, "backend"):
+         backend = backend or world_group.backend
+-    else:
++    elif torch.distributed.is_initialized():
+         backend = backend or torch.distributed.get_backend(world_group.device_group)
++    else:
++        backend = backend or "gloo"
+     if not model_parallel_is_initialized():
+         initialize_model_parallel(
+             tensor_model_parallel_size,
+diff --git a/vllm/v1/executor/uniproc_executor.py b/vllm/v1/executor/uniproc_executor.py
+index b616c3b7b..7ed2cc997 100644
+--- a/vllm/v1/executor/uniproc_executor.py
++++ b/vllm/v1/executor/uniproc_executor.py
+@@ -186,5 +186,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
+ 
+         cpu_group = get_world_group().cpu_group
+         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
+-        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
++        # BUILD-FIXES #103: skip all_reduce for single-GPU (cpu_group is None)
++        if cpu_group is not None:
++            dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+         return [memory_tensor.item()]
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 91dcdc2b9..bb970ba3c 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -20,6 +20,7 @@ from vllm.config.compilation import CompilationMode
+ from vllm.distributed import (
+     ensure_model_parallel_initialized,
+     init_distributed_environment,
++    initialize_model_parallel,
+     set_custom_all_reduce,
+ )
+ from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+@@ -1025,6 +1026,22 @@ def init_worker_distributed_environment(
+     override_envs_for_eplb(parallel_config)
+     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+ 
++    # BUILD-FIXES #103: Skip torch.distributed for single-GPU (world_size=1).
++    # Avoids creating ~13 epoll threads from gloo/TCPStore that consume
++    # ~3% CPU (~2 W) even when completely idle.
++    if parallel_config.world_size == 1:
++        logger.info(
++            "world_size=1, skipping torch.distributed initialization "
++            "(single-GPU mode)")
++        initialize_model_parallel(
++            tensor_model_parallel_size=parallel_config.tensor_parallel_size,
++            pipeline_model_parallel_size=parallel_config.pipeline_parallel_size,
++            prefill_context_model_parallel_size=parallel_config.prefill_context_parallel_size,
++            decode_context_model_parallel_size=parallel_config.decode_context_parallel_size,
++        )
++        ensure_ec_transfer_initialized(vllm_config)
++        return
++
+     init_method = distributed_init_method or "env://"
+ 
+     timeout = None
