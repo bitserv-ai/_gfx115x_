@@ -245,7 +245,8 @@ vllm_query_models() {
 # For llama.cpp Vulkan (RADV), which CAN use GTT, use the vanilla/llamacpp
 # backend configuration with explicit GPU_MEMORY_MB targeting VRAM+GTT instead.
 #
-# Handles multi-GPU systems by summing VRAM across all devices.
+# When HIP_VISIBLE_DEVICES is set, queries only the first selected GPU to
+# avoid multi-line output on multi-GPU hosts. APU partitions are summed.
 #
 # Outputs:
 #   Total allocatable GPU memory (VRAM only) in MB
@@ -253,13 +254,41 @@ vllm_query_models() {
 # Returns:
 #   0 on success, dies if rocm-smi query fails
 vllm_gpu_total_mb() {
-    local vram_sum
-    vram_sum="$(rocm-smi --showmeminfo vram 2>/dev/null | grep "VRAM Total Memory" | grep -oP '\d+$' | paste -sd+ | bc 2>/dev/null || echo 0)"
+    local visible_device
+    local -a rocm_smi_args=(--showmeminfo vram)
+    local -a vram_values=()
 
-    if [[ "${vram_sum}" -eq 0 ]]; then
+    visible_device="${HIP_VISIBLE_DEVICES%%,*}"
+    if [[ -n "${visible_device}" ]]; then
+        rocm_smi_args=(--device "${visible_device}" "${rocm_smi_args[@]}")
+    fi
+
+    while IFS= read -r value; do
+        value="$(echo "${value}" | tr -cd '0-9')"
+        if [[ -n "${value}" ]]; then
+            vram_values+=("${value}")
+        fi
+    done < <(rocm-smi "${rocm_smi_args[@]}" 2>/dev/null | awk '/VRAM Total Memory/ {print $NF}')
+
+    if [[ "${#vram_values[@]}" -eq 0 ]]; then
         die "Cannot query VRAM from rocm-smi. Is ROCm installed?"
     fi
-    echo $(( vram_sum / 1048576 ))
+
+    local vram_bytes
+    if [[ "${#vram_values[@]}" -eq 1 ]]; then
+        vram_bytes="${vram_values[0]}"
+    elif [[ -n "${visible_device}" ]]; then
+        local sum=0
+        local part
+        for part in "${vram_values[@]}"; do
+            sum=$((sum + part))
+        done
+        vram_bytes="${sum}"
+    else
+        vram_bytes="${vram_values[0]}"
+    fi
+
+    echo $(( vram_bytes / 1048576 ))
 }
 
 # Convert megabytes to a gpu-memory-utilization fraction (0.0-1.0).
@@ -340,51 +369,4 @@ vllm_log_optimization_state() {
     info "  Buffer ops:         ${AMDGCN_USE_BUFFER_OPS:-disabled}"
     info "  HSA GFX override:   ${HSA_OVERRIDE_GFX_VERSION:-not set}"
     info "  ROCm arch:          ${PYTORCH_ROCM_ARCH:-not set}"
-}
-
-# =============================================================================
-# Startup Failure Diagnostics
-# =============================================================================
-
-# Print detailed diagnostics when a vLLM instance fails to start.
-#
-# Shows whether the process died or timed out, the last 50 lines of the
-# log file, and attempts to diagnose common failure patterns (OOM, HIP
-# errors, import errors, port conflicts).
-#
-# Args:
-#   log_file     - Path to the vLLM instance log file
-#   instance_pid - PID of the vLLM process
-vllm_print_startup_failure_details() {
-    local log_file="$1"
-    local instance_pid="$2"
-
-    if ! kill -0 "${instance_pid}" 2>/dev/null; then
-        error "Process died during startup (PID ${instance_pid})"
-    else
-        error "Health check timed out — process alive but not responding"
-    fi
-
-    error "Log file: ${log_file}"
-    error "--- Last 50 lines ---"
-    tail -50 "${log_file}" >&2
-
-    local log_tail
-    log_tail="$(tail -200 "${log_file}" 2>/dev/null)" || true
-
-    if echo "${log_tail}" | grep -qi "out of memory\|OOM\|CUDA out of memory\|Memory allocation failed"; then
-        error "DIAGNOSIS: Out of memory. Reduce model size or gpu-memory-utilization."
-    fi
-    if echo "${log_tail}" | grep -qi "hipError\|ROCBLAS\|HSA error\|amdgpu"; then
-        error "DIAGNOSIS: ROCm/HIP error. Check ROCm installation and HSA_OVERRIDE_GFX_VERSION."
-    fi
-    if echo "${log_tail}" | grep -qi "ModuleNotFoundError\|ImportError"; then
-        error "DIAGNOSIS: Python import error. Check venv activation and dependencies."
-    fi
-    if echo "${log_tail}" | grep -qi "port.*already in use\|Address already in use"; then
-        error "DIAGNOSIS: Port conflict. Another process is using this port."
-    fi
-    if echo "${log_tail}" | grep -qi "Permission denied\|permission denied"; then
-        error "DIAGNOSIS: Permission denied. Check file ownership and directory permissions."
-    fi
 }

@@ -90,7 +90,7 @@ platform:
 build:
   vllm_dir: "/opt/src/vllm"
   total_steps: 36
-  cpython_version: "3.13.3"
+  cpython_version: "3.13.9"
   disk_required_gb: 100
   clang_min_version: 21
 
@@ -255,7 +255,7 @@ packages:
     repo: "https://github.com/ROCm/TheRock.git"
     recursive: true
     branch: "main"
-    commit: "4363b4ced602d475b3f24df97ecc3a020d7fed19"
+    commit: "a512f42c63d8de09f8769f33ca6a0a5ebea08043"
     src_dir: "therock"
     method: cmake
     phase: A
@@ -273,6 +273,7 @@ packages:
       - pandas
       - pyyaml
       - pytest
+      - mako
     notes: |
       TheRock MUST be built with GCC -- rocprofiler-systems has an explicit
       GNU compiler check that blocks Clang. TheRock produces amdclang (AMD's
@@ -348,32 +349,202 @@ packages:
           cmake which unconditionally copies it into the wheel. TheRock
           builds it but doesn't install it when THEROCK_BUILD_TESTING=OFF.
 
-      # 7. Hard-wire roctx64 path in TheRock explicit finders to avoid unresolved references
-      - type: sed
-        file: cmake/therock_explicit_finders.cmake
-        description: >-
-          Hard-wire TheRock roctx64 to the absolute libroctx64.so path in the
-          local install tree. TheRock's find_library() search for roctx64 can
-          resolve to a system or staging copy at configure time, causing
-          unresolved symbol errors at runtime if the found path is not on
-          LD_LIBRARY_PATH.
-        marker: roctx64
-        marker_absent: true
-        sed_command: s|roctx64|"${LOCAL_PREFIX}/profiler/roctracer/stage/lib/libroctx64.so"|
-
-      # 8. Hard-wire roctx64 path in RCCL pre-hook to match TheRock install tree
+      # 7. Skip roctx64 patch hooks when profiler stack is disabled (BUILD-FIXES #105)
+      # Replaces old #56/#57 (hard-wired roctx64 paths) with proper gating.
       - type: sed
         file: comm-libs/pre_hook_rccl.cmake
         description: >-
-          Hard-wire RCCL's roctx64 reference to the same absolute path used in
-          therock_explicit_finders.cmake. RCCL links roctx64 separately via its
-          own pre-hook; without this, the linker picks up a mismatched staging
-          copy and RCCL initialisation fails at runtime.
-        marker: roctx64
+          Skip RCCL's legacy roctx64 link patch when TheRock profiler support
+          is disabled. The top-level build config sets THEROCK_ENABLE_PROFILER=OFF,
+          so roctracer/roctx64 are intentionally unavailable and should not be
+          hard-required during RCCL configure.
+        marker: 'if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)'
         marker_absent: true
-        sed_command: s|roctx64|"${LOCAL_PREFIX}/profiler/roctracer/stage/lib/libroctx64.so"|
+        sed_command: 's|if(NOT WIN32)|if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)|'
 
-      # 9. Disable atomic_codegen tests in libhipcxx to prevent build failures
+      - type: sed
+        file: math-libs/BLAS/pre_hook_rocBLAS.cmake
+        description: >-
+          Skip rocBLAS' legacy roctx64 link patch when the profiler stack is
+          disabled, matching the top-level THEROCK_ENABLE_PROFILER=OFF build.
+        marker: 'if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)'
+        marker_absent: true
+        sed_command: 's|if(NOT WIN32)|if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)|'
+
+      - type: sed
+        file: math-libs/BLAS/pre_hook_rocSPARSE.cmake
+        description: >-
+          Skip rocSPARSE's legacy roctx64 link patch when the profiler stack
+          is disabled, avoiding the same missing-roctx64 configure failure
+          later in the math library build.
+        marker: 'if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)'
+        marker_absent: true
+        sed_command: 's|if(NOT WIN32)|if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)|'
+
+      # 8. Disable RCCL ROCTX tracing when profiler stack is disabled (BUILD-FIXES #106)
+      - type: sed
+        file: comm-libs/CMakeLists.txt
+        description: >-
+          Disable RCCL's optional ROCTX tracing integration. Upstream RCCL
+          enables ROCTX by default and later calls find_library(roctx64),
+          which fails under TheRock builds configured with
+          THEROCK_ENABLE_PROFILER=OFF because roctracer/roctx64 are not built.
+        marker: '-DROCTX=OFF'
+        marker_absent: true
+        sed_command: '/-DENABLE_MSCCL_KERNEL=OFF/a\      -DROCTX=OFF'
+
+      # 9. Restore RCCL tuner macro definitions before rccl_common.h uses them (BUILD-FIXES #107)
+      - type: sed
+        file: rocm-systems/projects/rccl/src/include/rccl_common.h
+        description: >-
+          Ensure RCCL's internal tuner macros are visible before rccl_common.h
+          references NCCL_NUM_ALGORITHMS and NCCL_NUM_PROTOCOLS. The current
+          RCCL snapshot defines those macros in plugin/nccl_tuner.h, so newer
+          rccl_common.h revisions fail to compile if that header is not pulled
+          in explicitly.
+        marker: '#include "plugin/nccl_tuner.h"'
+        marker_absent: true
+        sed_command: |-
+          /#include "nccl.h"/a\
+          #include "plugin\/nccl_tuner.h"
+
+      # 10. Make RCCL's NVTX header honor stub-only build (BUILD-FIXES #108)
+      - type: sed
+        file: rocm-systems/projects/rccl/src/include/nvtx.h
+        description: >-
+          Make RCCL's nvtx.h defer to nvtx_stub.h when TheRock passes
+          -DNVTX_NO_IMPL. Some sources include nvtx.h directly instead of going
+          through core.h, so without this guard the real NVTX declarations and
+          stub declarations are both compiled, causing nccl_domain and macro
+          redefinition errors.
+        marker: '#ifdef NVTX_NO_IMPL'
+        marker_absent: true
+        sed_command: |-
+          /^#define NCCL_NVTX_H_$/a\
+          #ifdef NVTX_NO_IMPL\
+          #include "nvtx_stub.h"\
+          #else
+
+      - type: sed
+        file: rocm-systems/projects/rccl/src/include/nvtx.h
+        description: >-
+          Close the NVTX_NO_IMPL guard added to RCCL's nvtx.h so profiler-
+          disabled builds consistently use the stub header path.
+        marker: '#endif // NVTX_NO_IMPL'
+        marker_absent: true
+        sed_command: |-
+          $i\
+          #endif // NVTX_NO_IMPL
+
+      - type: sed
+        file: rocm-systems/projects/rccl/src/include/nvtx_stub.h
+        description: >-
+          Extend RCCL's NVTX stub header with a no-op NCCL_NVTX3_FUNC_RANGE
+          definition. Several sources use that macro through core.h, so once
+          nvtx.h honors NVTX_NO_IMPL the stub path must also provide the same
+          API surface.
+        marker: '#define NCCL_NVTX3_FUNC_RANGE'
+        marker_absent: true
+        sed_command: |-
+          /#define NVTX3_RANGE_ADD_PAYLOAD(N, S, P)/a\
+          #define NCCL_NVTX3_FUNC_RANGE
+
+      # 11. Disable hipBLASLt/hipSPARSELt/MIOpen ROCTX markers when profiler disabled (BUILD-FIXES #109)
+      - type: sed
+        file: math-libs/BLAS/CMakeLists.txt
+        description: >-
+          Disable hipBLASLt's optional ROCTX marker integration. hipBLASLt
+          enables markers by default when BUILD_SHARED_LIBS is on, and then
+          hard-fails if roctx64 is not present. That conflicts with
+          THEROCK_ENABLE_PROFILER=OFF, where roctracer/roctx64 are intentionally
+          not built.
+        marker: '-DHIPBLASLT_ENABLE_MARKER=OFF'
+        marker_absent: true
+        sed_command: '/-DHIPBLASLT_ENABLE_THEROCK=ON/a\    -DHIPBLASLT_ENABLE_MARKER=OFF'
+
+      - type: sed
+        file: math-libs/BLAS/CMakeLists.txt
+        description: >-
+          Disable hipSPARSELt's optional ROCTX marker integration. hipSPARSELt
+          defaults HIPSPARSELT_ENABLE_MARKER to ON on non-Windows builds and
+          then hard-requires roctx64/roctracer during configure, which is
+          incompatible with THEROCK_ENABLE_PROFILER=OFF.
+        marker: '-DHIPSPARSELT_ENABLE_MARKER=OFF'
+        marker_absent: true
+        sed_command: '/-DHIPSPARSELT_ENABLE_THEROCK=ON/a\    -DHIPSPARSELT_ENABLE_MARKER=OFF'
+
+      - type: sed
+        file: ml-libs/CMakeLists.txt
+        description: >-
+          Disable MIOpen's optional rocTracer/ROCTX integration. MIOpen
+          enables MIOPEN_USE_ROCTRACER by default and then probes for
+          roctracer/roctx.h and roctx64 during configure, which fails when
+          THEROCK_ENABLE_PROFILER=OFF intentionally omits the profiler stack.
+        marker: '-DMIOPEN_USE_ROCTRACER=OFF'
+        marker_absent: true
+        sed_command: '/-DMIOPEN_USE_COMPOSABLEKERNEL=/a\      -DMIOPEN_USE_ROCTRACER=OFF'
+
+      # 12. Disable rocBLAS ROCTX integration when profiler stack is disabled (BUILD-FIXES #110)
+      - type: sed
+        file: math-libs/BLAS/CMakeLists.txt
+        description: >-
+          Disable rocBLAS's optional ROCTX integration. rocBLAS later probes
+          for roctracer headers and roctx when this path is enabled, which
+          conflicts with THEROCK_ENABLE_PROFILER=OFF where those profiler
+          components are intentionally unavailable.
+        marker: '-DROCTX=OFF'
+        marker_absent: true
+        sed_command: '0,/-DLINK_BLIS=OFF/s//-DLINK_BLIS=OFF\n    -DROCTX=OFF/'
+
+      - type: sed
+        file: rocm-libraries/projects/rocblas/library/CMakeLists.txt
+        description: >-
+          Gate rocBLAS's shared-library ROCTX header/library probing on the
+          ROCTX cache option as well. Upstream currently probes roctracer/roctx.h
+          whenever BUILD_SHARED_LIBS is on, so TheRock still fails in
+          projects/rocblas/library/CMakeLists.txt even when -DROCTX=OFF was
+          injected at the super-project layer.
+        marker: 'if(BUILD_SHARED_LIBS AND ROCTX)'
+        marker_absent: true
+        sed_command: 's|if(BUILD_SHARED_LIBS)|if(BUILD_SHARED_LIBS AND ROCTX)|'
+
+      - type: sed
+        file: rocm-libraries/projects/rocblas/library/CMakeLists.txt
+        description: >-
+          When ROCTX is explicitly disabled, still define DISABLE_ROCTX for
+          rocBLAS sources before the shared-library probe block. This keeps
+          files like logging.cpp from including roctracer/roctx.h after the
+          find_path()/find_library() probe itself has been skipped.
+        marker: 'add_compile_definitions("DISABLE_ROCTX")'
+        marker_absent: true
+        sed_command: '/--unwindlib=libgcc)/a \\\n  if(NOT ROCTX)\n    add_compile_definitions("DISABLE_ROCTX")\n  endif()'
+
+      # 13. Disable rocSPARSE BUILD_WITH_ROCTX when profiler stack is disabled (BUILD-FIXES #111)
+      - type: sed
+        file: math-libs/BLAS/CMakeLists.txt
+        description: >-
+          Disable rocSPARSE's optional ROCTX tracing path at the TheRock
+          subproject layer. rocSPARSE already guards its roctx header/library
+          probing with BUILD_WITH_ROCTX, but TheRock does not currently pass
+          that option, so profiler-disabled builds still fail in the explicit
+          find_path/find_library override.
+        marker: '-DBUILD_WITH_ROCTX=OFF'
+        marker_absent: true
+        sed_command: '0,/-DBUILD_CLIENTS_SAMPLES=OFF/s//-DBUILD_CLIENTS_SAMPLES=OFF\n    -DBUILD_WITH_ROCTX=OFF/'
+
+      # 14. ROCR-Runtime OpenCL blit kernels need explicit ROCm device-lib path (BUILD-FIXES #112)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocr-blit-device-libs.patch"
+        description: >-
+          Migrated from inline sed to .patch: use find_package(AMDDeviceLibs)
+          to resolve the bitcode directory via TheRock's dep-provider system.
+          The previous sed searched CMAKE_PREFIX_PATH/llvm/amdgcn/bitcode which
+          does not exist in TheRock's build tree (CMAKE_PREFIX_PATH only holds
+          CMake trampoline configs, not libraries). The patch adds a proper
+          find_package(AMDDeviceLibs QUIET CONFIG) call and resolves
+          AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode as the device-lib path.
+
+      # 15. Disable atomic_codegen tests in libhipcxx to prevent build failures
       - type: sed
         file: math-libs/libhipcxx/test/atomic_codegen/CMakeLists.txt
         description: >-
@@ -385,7 +556,7 @@ packages:
         marker_absent: true
         sed_command: s/atomics_tests/# atomics_tests disabled/
 
-      # 10. Add missing <cstdint> include to yaml-cpp emitterutils.cpp (rocprofiler-sdk)
+      # 16. Add missing <cstdint> include to yaml-cpp emitterutils.cpp (rocprofiler-sdk)
       - type: sed
         file: rocm-systems/projects/rocprofiler-sdk/external/yaml-cpp/src/emitterutils.cpp
         description: >-
@@ -398,7 +569,7 @@ packages:
         marker_absent: true
         sed_command: '/#include <sstream>/a #include <cstdint>'
 
-      # 11. Add missing <cstdint> include to elfio elf_types.hpp (rocprofiler-sdk)
+      # 17. Add missing <cstdint> include to elfio elf_types.hpp (rocprofiler-sdk)
       - type: sed
         file: rocm-systems/projects/rocprofiler-sdk/external/elfio/elfio/elf_types.hpp
         description: >-
@@ -410,6 +581,46 @@ packages:
         marker: <cstdint>
         marker_absent: true
         sed_command: '/#define ELFTYPES_H/i #include <cstdint>'
+
+      # 18. Guard primlibs benchmark deps find_package(amd_smi) with BUILD_BENCHMARK (BUILD-FIXES #113)
+      - type: patch
+        path: "${VLLM_DIR}/patches/therock-primlibs-benchmark-deps.patch"
+        description: >-
+          Guard find_package(amd_smi) in therock_primlibs_benchmark_deps.cmake
+          with BUILD_BENCHMARK. The file is included via CMAKE_INCLUDES in
+          _init.cmake, which runs before project() via
+          CMAKE_PROJECT_TOP_LEVEL_INCLUDES. Calling find_package(amd_smi) before
+          project() causes add_library(SHARED IMPORTED) to fail because
+          CMAKE_SYSTEM_NAME is not yet set ("target platform does not support
+          dynamic linking"). Skipping the find_package when benchmarks are
+          disabled avoids the premature call entirely.
+
+      # 19. Add rocdecode/rocjpeg as RUNTIME_DEPS for rocprofiler-sdk (BUILD-FIXES #115)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocprofiler-sdk-rocdecode-deps.patch"
+        description: >-
+          Add rocdecode and rocjpeg to rocprofiler-sdk's RUNTIME_DEPS in
+          profiler/CMakeLists.txt. rocprofiler-sdk calls find_package(rocdecode)
+          and find_package(rocjpeg) in rocprofiler_config_interfaces.cmake, but
+          TheRock did not declare them as dependencies. Without this, rocdecode
+          is only configured (EXCLUDE_FROM_ALL) but never built/staged, leaving
+          rocdecode-config.cmake incomplete (missing rocdecode-targets.cmake and
+          include dir). The dep-provider then finds the broken config file,
+          causing a FATAL_ERROR during rocprofiler-sdk configure.
+
+      # 20. Move media-libs before profiler in add_subdirectory order (BUILD-FIXES #115)
+      - type: patch
+        path: "${VLLM_DIR}/patches/therock-media-libs-before-profiler.patch"
+        description: >-
+          Move add_subdirectory(media-libs) before add_subdirectory(profiler)
+          in TheRock's root CMakeLists.txt. Patch #19 adds rocdecode/rocjpeg as
+          RUNTIME_DEPS to rocprofiler-sdk, but therock_cmake_subproject_declare
+          calls _therock_assert_is_cmake_subproject which does get_target_property
+          on each dep — the targets must already exist. Since rocdecode/rocjpeg
+          are declared in media-libs/CMakeLists.txt, media-libs must be processed
+          before profiler. rocdecode/rocjpeg only depend on base, core, and
+          third-party/sysdeps (all processed before both), so this reordering
+          is safe.
 
     environment:
       BUILD_DOCS: "OFF"
@@ -430,7 +641,7 @@ packages:
   aocl_utils:
     repo: "https://github.com/amd/aocl-utils.git"
     branch: "main"
-    commit: "421ede62cf213e87c05a554a6ad1475c2105a70b"
+    commit: "deb418767224511d146fc5e6841a55a6f69e5e79"
     src_dir: "aocl-utils"
     method: cmake
     phase: B
@@ -455,7 +666,7 @@ packages:
   aocl_libm:
     repo: "https://github.com/amd/aocl-libm-ose.git"
     branch: "master"
-    commit: "9e33942012291e345ccfd1ebdbe35988e19c79b2"
+    commit: "86223910103068db48f42d9cc59c0bf3fc46fa5f"
     src_dir: "aocl-libm"
     method: scons
     phase: B
@@ -522,8 +733,8 @@ packages:
 
   cpython:
     repo: "https://github.com/python/cpython.git"
-    branch: "v3.13.3"
-    commit: "1cbe481834751b0125e006042ffbd8cd5eaec8a8"
+    branch: "v3.13.9"
+    commit: "8f61118196ba00747076def18ea7ad2c43a1dc05"
     src_dir: "cpython"
     method: autoconf
     phase: B
@@ -579,8 +790,8 @@ packages:
 
   pytorch:
     repo: "https://github.com/ROCm/pytorch.git"
-    branch: "develop"
-    commit: "fb6e4ef45355a0845db438946fd9f96279317baf"
+    branch: "release/2.11"
+    commit: "9df77ad5fc2dabcf31fd25ddea60625901476d8b"
     src_dir: "pytorch"
     # Clone flags: ROCm fork validation + hipified file cleanup
     validate_remote: "ROCm/pytorch"
@@ -839,8 +1050,8 @@ packages:
 
   torchvision:
     repo: "https://github.com/pytorch/vision.git"
-    branch: "main"
-    commit: "9bf794dd6f786b869010f8df2a4fc6886108f03d"
+    branch: "v0.24.1"
+    commit: "d801a34632023859a0a274803d6abaf0a45d77a5"
     src_dir: "torchvision"
     method: pip
     phase: C
@@ -867,7 +1078,7 @@ packages:
   triton:
     repo: "https://github.com/ROCm/triton.git"
     branch: "main_perf"
-    commit: "cb89b61769217eaae48673e56e21ff05cf05e350"
+    commit: "0ec280cf80dd91e9a86887981a670f2d4541a32b"
     src_dir: "triton"
     # Clone flag: ROCm fork validation (ensure remote points to ROCm/triton)
     validate_remote: "ROCm/triton"
@@ -946,7 +1157,7 @@ packages:
   aotriton:
     repo: "https://github.com/ROCm/aotriton.git"
     branch: "main"
-    commit: "1884d3d0dbe24b5a89560e61bdf0aafd99b89cf7"
+    commit: "e71fc2a64cec741bf11c122ff97f4cca9fc7d0b7"
     src_dir: "aotriton"
     method: cmake
     phase: D
@@ -978,8 +1189,8 @@ packages:
 
   vllm:
     repo: "https://github.com/vllm-project/vllm.git"
-    branch: "main"
-    commit: "719735d6c5f5dae14948c2150e6858351994b0b9"
+    branch: "v0.24.0"
+    commit: "ee0da84ab9e04ac7610e28580af62c365e898389"
     src_dir: "vllm"
     method: pip
     phase: E
@@ -1142,22 +1353,26 @@ packages:
           to raise "RuntimeError: Duplicate pattern" and crash the engine.
           This prevents torch.compile from working, forcing --enforce-eager.
 
-      # 10. Triton sampler bypass: gfx1151 page fault after torch.compile AOT
-      - type: sed
-        file: "vllm/v1/sample/ops/topk_topp_sampler.py"
-        marker: "NOTE(gfx1151)"
-        marker_absent: true
-        sed_command: >
-          /if HAS_TRITON and logits.shape\[0\] >= 8:/,+2{
-            s|    if HAS_TRITON.*|    # NOTE(gfx1151): The Triton top-k/top-p kernel page-faults on RDNA 3.5\n    # after torch.compile AOT compilation. Use the PyTorch sort path instead.\n    # if HAS_TRITON and logits.shape[0] >= 8:\n    #     return apply_top_k_top_p_triton(logits, k, p)|;
-            /return apply_top_k_top_p_triton/d
-          }
-        description: >
-          Comment out the Triton top-k/top-p sampler kernel path. On gfx1151,
-          the Triton kernel page-faults after torch.compile AOT compilation
-          has rewritten the sampling graph. The PyTorch sort-based path
-          (apply_top_k_top_p_pytorch) is functionally identical and works
-          correctly on all architectures.
+      # 10. Triton sampler bypass — DISABLED: testing upstream behavior (BUILD-FIXES #41)
+      # The Triton top-k/top-p kernel page-faulted on gfx1151 after torch.compile
+      # AOT compilation. Paudley treats this as historical/version-specific, not
+      # architecture-specific. Disabled to test whether the fault persists with
+      # current Triton/vLLM versions. Re-enable if page fault recurs.
+      # - type: sed
+      #   file: "vllm/v1/sample/ops/topk_topp_sampler.py"
+      #   marker: "NOTE(gfx1151)"
+      #   marker_absent: true
+      #   sed_command: >
+      #     /if HAS_TRITON and logits.shape\[0\] >= 8:/,+2{
+      #       s|    if HAS_TRITON.*|    # NOTE(gfx1151): The Triton top-k/top-p kernel page-faults on RDNA 3.5\n    # after torch.compile AOT compilation. Use the PyTorch sort path instead.\n    # if HAS_TRITON and logits.shape[0] >= 8:\n    #     return apply_top_k_top_p_triton(logits, k, p)|;
+      #       /return apply_top_k_top_p_triton/d
+      #     }
+      #   description: >
+      #     Comment out the Triton top-k/top-p sampler kernel path. On gfx1151,
+      #     the Triton kernel page-faults after torch.compile AOT compilation
+      #     has rewritten the sampling graph. The PyTorch sort-based path
+      #     (apply_top_k_top_p_pytorch) is functionally identical and works
+      #     correctly on all architectures.
 
       # 11. FLA chunk_delta_h: AMD autotune restrict + exp() float32 cast
       - type: sed
@@ -1386,12 +1601,12 @@ packages:
       # 28. Fix build-system dependency: remove strict torch version pin
       - type: sed
         file: "pyproject.toml"
-        marker: 'torch == 2.10.0'
-        sed_command: 's/"torch == 2.10.0"/"torch >= 2.10.0"/'
+        marker: 'torch == 2.11.0'
+        sed_command: 's/"torch == 2.11.0"/"torch >= 2.11.0"/'
         description: >-
           Relax strict torch version requirement in build-system. Prevents pip
-          from downloading torch 2.10.0 from PyPI when a custom source-built
-          torch >= 2.10.0 is already installed in the venv.
+          from downloading torch 2.11.0 from PyPI when a custom source-built
+          torch >= 2.11.0 is already installed in the venv.
 
       # 29. Enable native ROCm PagedAttention for gfx1151 (Strix Halo)
       - type: sed
@@ -1540,8 +1755,8 @@ packages:
 
   aiter:
     repo: "https://github.com/ROCm/aiter.git"
-    branch: "main"
-    commit: "9a469a608b2c10b7157df573a38d31e5bf4038b4"
+    branch: "v0.1.16.post3"
+    commit: "27fdb590cf85855395936ac57e4069d33e77eb2f"
     # Note: Fetched as PyTorch submodule (pytorch/third_party/aiter)
     src_dir: "pytorch/third_party/aiter"
     method: pip
@@ -1735,7 +1950,7 @@ packages:
   llamacpp:
     repo: "https://github.com/ggml-org/llama.cpp.git"
     branch: "master"
-    commit: "45cac7ca703fb9085eae62b9121fca01d20177f6"
+    commit: "6f4f53f2b7da54fcdbbecaaa734337c337ad6176"
     src_dir: "llama.cpp"
     shallow: true
     method: cmake
@@ -1819,8 +2034,8 @@ packages:
 
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
-    branch: "v10.0.0"
-    commit: "d434d8b5a6fcdbb3bc93201fa8d4758851df8720"
+    branch: "v10.8.1"
+    commit: "020717643a9d41cd9b04bd7349c190921367cd5f"
     src_dir: "lemonade"
     shallow: true
     method: cmake
@@ -1832,9 +2047,9 @@ packages:
     patches:
       - type: sed
         file: "src/cpp/resources/backend_versions.json"
-        marker: '"vulkan": "b8'
+        marker: '"vulkan": "b9747"'
         description: "Disable llamacpp version check — custom builds don't match bundled releases"
-        sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm": "[^"]*"/"rocm": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
+        sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm-stable": "[^"]*"/"rocm-stable": ""/; /"llamacpp"/,/}/ s/"rocm-nightly": "[^"]*"/"rocm-nightly": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
     notes: |
       Lemonade inference server built from source (CMake + Ninja), tracks
       latest default branch. Produces lemond (daemon) + lemonade (CLI)

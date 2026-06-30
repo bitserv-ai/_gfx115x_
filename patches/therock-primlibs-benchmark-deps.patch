@@ -1,0 +1,23 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/cmake/therock_primlibs_benchmark_deps.cmake b/cmake/therock_primlibs_benchmark_deps.cmake
+index 925fc0faa..7275854fe 100644
+--- a/cmake/therock_primlibs_benchmark_deps.cmake
++++ b/cmake/therock_primlibs_benchmark_deps.cmake
+@@ -11,6 +11,15 @@
+ # TODO(https://github.com/ROCm/TheRock/issues/4651): Remove once upstream
+ # rocPRIM adds its own find_package(amd_smi).
+ 
+-if(NOT TARGET amd_smi)
+-  find_package(amd_smi REQUIRED CONFIG)
++# Only resolve amd_smi when benchmarks are actually enabled.
++# This file is included via CMAKE_INCLUDES in _init.cmake, which runs
++# before project() via CMAKE_PROJECT_TOP_LEVEL_INCLUDES. Calling
++# find_package(amd_smi) before project() causes add_library(SHARED IMPORTED)
++# to fail because CMAKE_SYSTEM_NAME is not yet set (CMake reports "target
++# platform does not support dynamic linking"). Guarding with BUILD_BENCHMARK
++# skips the find_package when benchmarks are disabled.
++if(BUILD_BENCHMARK)
++  if(NOT TARGET amd_smi)
++    find_package(amd_smi REQUIRED CONFIG)
++  endif()
+ endif()

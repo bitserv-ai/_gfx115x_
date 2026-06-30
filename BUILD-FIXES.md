@@ -488,6 +488,11 @@ encoder path cannot use CK attention.
 falls through to `TRITON_ATTN` which works correctly. If a previous build
 had extended the gate, this patch reverts it.
 
+**v0.24.0 status**: OBSOLETE. Upstream vLLM v0.24.0 (`ee0da84a`) now gates
+ViT AITER FA on `on_gfx9()` only — the `on_gfx9() or on_gfx1x()` marker no
+longer exists in `vllm/platforms/rocm.py`. The patch is auto-skipped at
+build time (marker not found, `marker_present: true`).
+
 ### 37. FP8 linear disable on gfx1x (Patch 7)
 
 **Symptom**: GPU page fault crash during FP8 quantized inference.
@@ -565,7 +570,7 @@ pass as a single HIPGraph) combined with ALL AITER optimizations
 (attention, GEMM, normalization). Previously, the `+rms_norm` bug forced
 PIECEWISE graph mode with AITER disabled.
 
-### 41. Triton sampler page fault on gfx1151 (Patch 10)
+### 41. Triton sampler page fault on gfx1151 (Patch 10) — DISABLED: testing upstream behavior
 
 **Symptom**: GPU page fault during top-k/top-p sampling after torch.compile
 AOT compilation on RDNA 3.5.
@@ -576,10 +581,15 @@ compilation by torch.compile. The kernel works in eager mode but the
 compiled version triggers an illegal memory access on RDNA 3.5's wave32
 architecture.
 
-**Fix**: Bypass the Triton sampler in
+**Fix**: ~~Bypass the Triton sampler in
 `vllm/v1/sample/ops/topk_topp_sampler.py`. The PyTorch sort-based path
 (`topk` + `cumsum`) is functionally identical and works on all
-architectures.
+architectures.~~
+
+**Status**: Disabled. The page fault may be version-specific (Triton/vLLM
+version skew) rather than architecture-specific. The YAML patch is commented
+out. During the next rebuild, test whether the Triton sampler works without
+the bypass. If the page fault recurs, re-enable the bypass.
 
 ### 42. FLA chunk_delta_h autotuner + exp() type inference (Patches 11-15)
 
@@ -848,7 +858,7 @@ imports. Applied to all three `jit_dir` capture sites (lines 2372, 3037, 3204).
 
 ## TheRock Phase A — Additional Patches
 
-### 56. TheRock roctx64 path in explicit finders (therock/7)
+### 56. TheRock roctx64 path in explicit finders (therock/7) — SUPERSEDED by #105
 
 **Symptom**: Unresolved symbol errors for roctx64 at runtime despite
 successful build.
@@ -858,10 +868,13 @@ successful build.
 configure time. At runtime the embedded path may not be on
 `LD_LIBRARY_PATH`, causing `libroctx64.so` to not be found.
 
-**Fix**: Replace bare `roctx64` with the absolute path
-`${LOCAL_PREFIX}/profiler/roctracer/stage/lib/libroctx64.so`.
+**Fix**: ~~Replace bare `roctx64` with the absolute path
+`${LOCAL_PREFIX}/profiler/roctracer/stage/lib/libroctx64.so`.~~
+**Superseded**: With `THEROCK_ENABLE_PROFILER=OFF`, roctx64/roctracer are
+not built at all. The pre-hook is now gated on `THEROCK_ENABLE_PROFILER`
+(BUILD-FIXES #105), eliminating the need for hard-wired paths.
 
-### 57. RCCL roctx64 path (therock/8)
+### 57. RCCL roctx64 path (therock/8) — SUPERSEDED by #105
 
 **Symptom**: RCCL initialization fails at runtime with unresolved roctx64
 symbols.
@@ -870,8 +883,10 @@ symbols.
 (`comm-libs/pre_hook_rccl.cmake`), separate from TheRock's explicit
 finders. Same `find_library` resolution problem as #56.
 
-**Fix**: Same hard-wired absolute path as #56, applied to
-`pre_hook_rccl.cmake`.
+**Fix**: ~~Same hard-wired absolute path as #56, applied to
+`pre_hook_rccl.cmake`.~~
+**Superseded**: Same gating as #56 — RCCL pre-hook now skips roctx64
+when `THEROCK_ENABLE_PROFILER` is off (BUILD-FIXES #105).
 
 ### 58. libhipcxx atomic_codegen tests disabled (therock/9)
 
@@ -1683,6 +1698,9 @@ else:
 - `.env`: Removed `VLLM_ENABLE_V1_MULTIPROCESSING=0` (ineffective for `vllm serve`)
 
 **Upstream status**: Not yet fixed upstream (as of vLLM commit 719735d6c).
+vLLM v0.24.0 (`ee0da84a`) renamed `has_unfinished_requests()` to
+`has_requests()`. The `.patch` file was regenerated accordingly
+(`has_requests()` + updated line numbers, `git apply --check` passes).
 
 ### 97. AITER FP4 method calls unimported `on_gfx950()`
 
@@ -1707,6 +1725,9 @@ FP4 which is not supported on RDNA 3.5.
 **YAML**: `type: patch` in `vllm-packages.yaml`
 
 **Upstream status**: Not yet reported upstream (as of vLLM commit 719735d6c).
+vLLM v0.24.0 (`ee0da84a`) added a third occurrence (`is_tgemm_enabled`).
+The `.patch` file was regenerated with updated line numbers (1235→1731)
+and all three `on_gfx950()` → `on_gfx9()` replacements.
 
 ### 98. `clone_pkg()` — recursive submodule pull corrupts working tree
 
@@ -1840,6 +1861,274 @@ Additional guards:
 **YAML**: `type: patch` in `vllm-packages.yaml`
 
 **Upstream status**: Not yet reported upstream (as of vLLM commit 719735d6c).
+
+### 103. LD_LIBRARY_PATH library mixing across llama.cpp backends
+
+**File:** `vllm-env.sh` (runtime environment script)
+
+**Symptom**: When Lemonade's `llama-swap` switches between ROCm and Vulkan
+backends, the dynamic loader may mix `libggml-hip.so` and `libggml-vulkan.so`
+because both install directories were added to `LD_LIBRARY_PATH` globally.
+
+**Root cause**: `vllm-env.sh` exported `LD_LIBRARY_PATH` for both the ROCm
+and Vulkan llama.cpp build directories. Since `LD_LIBRARY_PATH` is a global
+environment variable, the dynamic loader sees all backend libraries
+simultaneously. When `build-vllm.sh` already sets `$ORIGIN:${LOCAL_PREFIX}/lib`
+as RUNPATH on all binaries and shared libraries via `patchelf`, the
+`LD_LIBRARY_PATH` entries are redundant — and actively harmful when multiple
+backends coexist.
+
+**Fix**: Remove the two `LD_LIBRARY_PATH` export lines for the llama.cpp
+backend directories. `PATH` (for binary discovery) and
+`LEMONADE_LLAMACPP_DIR` / `LEMONADE_LLAMACPP_VULKAN_DIR` (for Lemonade
+backend selection) remain. Binaries resolve their shared libraries via
+RUNPATH (`$ORIGIN`), keeping each backend's libraries isolated.
+
+**Result**: No library mixing. Each `llama-server` process loads only its
+own backend's `.so` files via RUNPATH, regardless of which other backends
+are installed.
+
+**Inspired by**: Upstream `paudley/ai-notes` commit `dbfb70e` which applied
+the same fix. Our `build-vllm.sh` already had RUNPATH since v0.3.0; this
+completes the fix in `vllm-env.sh`.
+
+### 104. `eval echo` expands `$ORIGIN` as unbound shell variable in patchelf_rpath
+
+**File:** `build-vllm.sh` (YAML patch handler, `patchelf_rpath` / `patchelf_needed` / `file_copy`)
+
+**Symptom**: When a `patchelf_rpath` YAML entry contains `$ORIGIN` (a dynamic
+linker token, not a shell variable), `eval echo` expands it as an unbound
+shell variable — producing an empty string. The RPATH entry silently loses
+the `$ORIGIN` token, causing the dynamic linker to fail resolving sibling
+`.so` files relative to the binary's location.
+
+**Root cause**: The `eval echo "${p_rpath}"` pattern was used to expand shell
+variables like `${LOCAL_PREFIX}` in YAML values. However, `eval` re-parses
+the entire string, expanding **any** `$`-token — including `$ORIGIN` and
+`$PLATFORM`, which are reserved by the dynamic linker, not the shell. The
+existing YAML entries used `\\$ORIGIN` (backslash-escaped) to work around
+this, but the escape convention was a latent footgun for future entries.
+
+**Fix**: Replace `eval echo` with Bash string substitution
+(`${var//pattern/replacement}`) in the `patchelf_rpath`, `patchelf_needed`,
+and `file_copy` handlers. Only `${LOCAL_PREFIX}` and `${VLLM_DIR}` are
+substituted; `$ORIGIN` and `$PLATFORM` pass through literally as dynamic
+linker tokens. No escape convention needed.
+
+**Result**: `$ORIGIN` in YAML `rpath` values works with or without backslash
+escaping. The `eval echo` footgun is eliminated.
+
+### 105. roctx64 pre-hook gating on THEROCK_ENABLE_PROFILER (supersedes #56/#57)
+
+**Files:** `comm-libs/pre_hook_rccl.cmake`, `math-libs/BLAS/pre_hook_rocBLAS.cmake`,
+`math-libs/BLAS/pre_hook_rocSPARSE.cmake`
+
+**Symptom**: RCCL/rocBLAS/rocSPARSE pre-hooks unconditionally call
+`find_library(roctx64 ...)`, which fails when `THEROCK_ENABLE_PROFILER=OFF`
+because roctracer/roctx64 are not built.
+
+**Root cause**: The pre-hooks gate their roctx64 link patches on
+`if(NOT WIN32)` only — there is no check for the profiler being enabled.
+
+**Fix**: Gate all three pre-hooks on `if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)`.
+When the profiler is off, the pre-hooks skip entirely, eliminating the need
+for hard-wired roctx64 paths (#56/#57).
+
+**Supersedes**: #56 (TheRock roctx64 explicit finders) and #57 (RCCL roctx64 path).
+
+### 106. RCCL ROCTX tracing enabled by default despite profiler disabled
+
+**File:** `comm-libs/CMakeLists.txt`
+
+**Symptom**: RCCL enables ROCTX tracing by default and calls
+`find_library(roctx64)` during configure, which fails when
+`THEROCK_ENABLE_PROFILER=OFF`.
+
+**Fix**: Inject `-DROCTX=OFF` into RCCL's CMake args after
+`-DENABLE_MSCCL_KERNEL=OFF`.
+
+### 107. RCCL rccl_common.h missing tuner macro definitions
+
+**File:** `rocm-systems/projects/rccl/src/include/rccl_common.h`
+
+**Symptom**: `NCCL_NUM_ALGORITHMS` and `NCCL_NUM_PROTOCOLS` undeclared in
+`rccl_common.h`.
+
+**Root cause**: The current RCCL snapshot defines those macros in
+`plugin/nccl_tuner.h`, but `rccl_common.h` does not include it.
+
+**Fix**: Add `#include "plugin/nccl_tuner.h"` after `#include "nccl.h"`.
+
+### 108. RCCL nvtx.h ignores NVTX stub mode for direct includes
+
+**Files:** `rocm-systems/projects/rccl/src/include/nvtx.h`,
+`rocm-systems/projects/rccl/src/include/nvtx_stub.h`
+
+**Symptom**: `nccl_domain` and macro redefinition errors when building with
+`-DNVTX_NO_IMPL`.
+
+**Root cause**: Some sources include `nvtx.h` directly instead of going
+through `core.h`. Without an `NVTX_NO_IMPL` guard, both real NVTX declarations
+and stub declarations are compiled.
+
+**Fix**: Add `#ifdef NVTX_NO_IMPL` guard to `nvtx.h` (redirect to
+`nvtx_stub.h`), close guard at end of file, and add `NCCL_NVTX3_FUNC_RANGE`
+macro to `nvtx_stub.h`.
+
+### 109. hipBLASLt/hipSPARSELt/MIOpen ROCTX markers enabled by default
+
+**Files:** `math-libs/BLAS/CMakeLists.txt`, `ml-libs/CMakeLists.txt`
+
+**Symptom**: hipBLASLt, hipSPARSELt, and MIOpen all enable ROCTX markers/tracing
+by default and hard-fail if roctx64/roctracer is not present during configure.
+
+**Fix**: Inject `-DHIPBLASLT_ENABLE_MARKER=OFF`,
+`-DHIPSPARSELT_ENABLE_MARKER=OFF`, and `-DMIOPEN_USE_ROCTRACER=OFF` into
+their respective CMake args.
+
+### 110. rocBLAS roctracer header probe despite ROCTX=OFF
+
+**Files:** `math-libs/BLAS/CMakeLists.txt`,
+`rocm-libraries/projects/rocblas/library/CMakeLists.txt`
+
+**Symptom**: rocBLAS probes for roctracer/roctx.h whenever
+`BUILD_SHARED_LIBS` is on, even when `-DROCTX=OFF` is set at the
+super-project layer.
+
+**Fix**: (1) Inject `-DROCTX=OFF` into the super-project CMake args.
+(2) Gate the shared-library probe on `if(BUILD_SHARED_LIBS AND ROCTX)`.
+(3) Define `DISABLE_ROCTX` compile definition when `NOT ROCTX`.
+
+### 111. rocSPARSE BUILD_WITH_ROCTX not passed by TheRock
+
+**File:** `math-libs/BLAS/CMakeLists.txt`
+
+**Symptom**: rocSPARSE guards its roctx probe with `BUILD_WITH_ROCTX`, but
+TheRock does not pass that option, so profiler-disabled builds still fail.
+
+**Fix**: Inject `-DBUILD_WITH_ROCTX=OFF` into the super-project CMake args.
+
+### 112. ROCR-Runtime OpenCL blit kernels missing --rocm-device-lib-path
+
+**File:** `rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/image/blit_src/CMakeLists.txt`
+
+**Symptom**: ROCR-Runtime's OpenCL blit kernel generator fails during
+bootstrap because clang cannot find ROCm device bitcode.
+
+**Root cause**: The custom `clang -x cl` command does not inherit a usable
+default ROCm install root while bootstrapping. The previous inline sed
+patches searched `${CMAKE_PREFIX_PATH}/llvm/amdgcn/bitcode`, but in
+TheRock's build tree `CMAKE_PREFIX_PATH` only holds CMake trampoline
+configs (`.cmake` files), not actual libraries — the bitcode lives under
+`amd-llvm/dist/lib/llvm/amdgcn/bitcode/`.
+
+**Fix**: Migrated from inline sed to `.patch` file
+(`patches/rocr-blit-device-libs.patch`). The patch adds
+`find_package(AMDDeviceLibs QUIET CONFIG)` (already provided by TheRock's
+dep-provider system) and resolves the bitcode directory via
+`AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode`, with a
+`CMAKE_PREFIX_PATH`-based fallback for standalone builds.
+
+### 113. PyTorch ROCm import failure diagnostics and automatic wheel reinstall
+
+**File:** `build-vllm.sh` (`validate_pytorch` step, 3 new helper functions)
+
+**Symptom**: `import torch` fails with
+`libtorch_hip.so: undefined symbol: _ZN2at4cuda4blas4gemm` — a known PyTorch
+ROCm ABI mismatch that occurs after source builds when the dynamic linker
+picks up a stale or mismatched `libtorch_hip.so`.
+
+**Root cause**: The `at::cuda::blas::gemm` symbol is sometimes missing from
+`libtorch_hip.so` after a rebuild, typically due to ABI compatibility flags
+(e.g. `-fclang-abi-compat=17`) or stale wheel artifacts in site-packages.
+
+**Fix**: Three new functions in `build-vllm.sh`:
+1. `is_known_pytorch_rocm_import_failure()` — detects the specific
+   `_ZN2at4cuda4blas4gemm` unresolved symbol signature in the import log.
+2. `diagnose_pytorch_import_failure()` — dumps diagnostics: `readelf -d`
+   NEEDED/RPATH/RUNPATH, `ldd`, `nm` symbol search across all torch `.so`
+   files, and `LD_DEBUG=libs,symbols` trace saved to
+   `${VLLM_DIR}/torch-import-ld-debug.log`.
+3. `retry_pytorch_wheel_install()` — removes all old torch artifacts from
+   site-packages (Python `site.getsitepackages()` + `getusersitepackages()`)
+   and force-reinstalls from the built wheel via `uv pip install --force-reinstall`.
+
+`validate_pytorch()` now uses a temp log file, calls diagnostics on failure,
+and attempts a one-time retry before giving up.
+
+**Result**: Build no longer dies with a bare "PyTorch GPU validation failed"
+on the known ROCm import failure — instead it diagnoses the root cause and
+auto-recovers if possible.
+
+### 114. rocRAND configure fails: find_package(amd_smi) called before project()
+
+**File:** `cmake/therock_primlibs_benchmark_deps.cmake` (TheRock)
+
+**Symptom**: rocRAND configure fails with:
+`ADD_LIBRARY called with SHARED option but the target platform does not
+support dynamic linking.`
+
+**Root cause**: TheRock commit `dd51a250b` added
+`therock_primlibs_benchmark_deps.cmake` via `CMAKE_INCLUDES` to rocRAND
+(and other primitives libs). This file is included in `_init.cmake`, which
+runs via `CMAKE_PROJECT_TOP_LEVEL_INCLUDES` **before** `project()`. Calling
+`find_package(amd_smi)` before `project()` causes `add_library(amd_smi SHARED
+IMPORTED)` to fail because `CMAKE_SYSTEM_NAME` is not yet set. The
+`BUILD_BENCHMARK=OFF` flag does not help because `CMAKE_INCLUDES` are
+written to `_init.cmake` unconditionally.
+
+**Fix**: Patch `therock_primlibs_benchmark_deps.cmake` to guard
+`find_package(amd_smi)` with `if(BUILD_BENCHMARK)`. When benchmarks are
+disabled, the `find_package` is skipped entirely, avoiding the premature
+call before `project()`.
+
+### 115. rocprofiler-sdk configure fails: rocdecode-config.cmake references unbuilt files
+
+**File:** `profiler/CMakeLists.txt` (TheRock)
+
+**Symptom**: rocprofiler-sdk configure fails with:
+```
+CMake Error at .../rocdecode-config.cmake:16 (include):
+  include could not find requested file:
+    .../rocdecode-targets.cmake
+CMake Error at .../rocdecode-config.cmake:28 (message):
+  File or directory .../build/include referenced by
+  variable rocdecode_INCLUDE_DIR does not exist !
+```
+
+**Root cause**: rocprofiler-sdk calls `find_package(rocdecode)` and
+`find_package(rocjpeg)` in `rocprofiler_config_interfaces.cmake`, but
+TheRock's `profiler/CMakeLists.txt` does not declare rocdecode/rocjpeg as
+`RUNTIME_DEPS` for rocprofiler-sdk. rocdecode is declared with
+`EXCLUDE_FROM_ALL` in `media-libs/CMakeLists.txt`, so it is only configured
+( `stamp/configure.stamp`) but never built/staged (no `build.stamp`, no
+`dist/`, no `rocdecode-targets.cmake`). The dep-provider's
+`find_package(rocdecode CONFIG QUIET)` finds the incomplete
+`rocdecode-config.cmake` in the build tree, which references
+`rocdecode-targets.cmake` (not yet generated) and `build/include` (not yet
+staged), causing a FATAL_ERROR.
+
+**Fix**: Add `rocdecode` and `rocjpeg` to `RUNTIME_DEPS` of rocprofiler-sdk
+in `profiler/CMakeLists.txt`. This ensures TheRock builds and stages
+rocdecode/rocjpeg before rocprofiler-sdk configure runs, making
+`rocdecode-config.cmake` and `rocdecode-targets.cmake` complete and
+resolvable.
+
+**Patch**: `patches/rocprofiler-sdk-rocdecode-deps.patch` (YAML #19)
+
+**Follow-up**: Adding `rocdecode`/`rocjpeg` as `RUNTIME_DEPS` caused
+`get_target_property() called with non-existent target "rocdecode"` because
+`add_subdirectory(profiler)` (line 501) is processed before
+`add_subdirectory(media-libs)` (line 510) in TheRock's root `CMakeLists.txt`.
+`therock_cmake_subproject_declare` calls
+`_therock_assert_is_cmake_subproject` which does `get_target_property` on each
+`RUNTIME_DEPS` target — the targets must already exist. Since
+rocdecode/rocjpeg only depend on `base`, `core`, and `third-party/sysdeps`
+(all processed before both), moving `add_subdirectory(media-libs)` before
+`add_subdirectory(profiler)` is safe.
+
+**Follow-up patch**: `patches/therock-media-libs-before-profiler.patch`
+(YAML #20)
 
 ## Runtime Environment Files (Phase I)
 
