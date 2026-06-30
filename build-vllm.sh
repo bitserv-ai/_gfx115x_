@@ -289,6 +289,114 @@ prune_old_wheels() {
 }
 
 # =============================================================================
+# PyTorch ROCm Import Failure Diagnostics & Recovery
+# =============================================================================
+# Detects the known libtorch_hip.so unresolved at::cuda::blas::gemm symbol
+# failure, dumps diagnostics (LD_DEBUG trace, readelf, ldd, nm), and attempts
+# a one-time clean wheel reinstall before giving up.
+
+is_known_pytorch_rocm_import_failure() {
+    local _log_file="${1}"
+    [[ -f "${_log_file}" ]] || return 1
+    grep -q 'libtorch_hip.so: undefined symbol: _ZN2at4cuda4blas4gemm' "${_log_file}"
+}
+
+diagnose_pytorch_import_failure() {
+    local _log_file="${1}"
+    [[ -f "${_log_file}" ]] || return 0
+
+    if is_known_pytorch_rocm_import_failure "${_log_file}"; then
+        warn "Detected libtorch_hip.so unresolved at::cuda::blas::gemm symbol."
+        warn "This is a PyTorch ROCm import failure; the validator will attempt one clean wheel reinstall before giving up."
+        warn "Environment: LD_PRELOAD=${LD_PRELOAD:-<unset>}"
+        warn "Environment: LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+        if [[ -f "${PYTORCH_SRC}/cmake/Dependencies.cmake" ]]; then
+            if grep -q -- '-fclang-abi-compat=17' "${PYTORCH_SRC}/cmake/Dependencies.cmake"; then
+                warn "Potential cause: cmake/Dependencies.cmake still contains -fclang-abi-compat=17."
+            else
+                warn "Checked ${PYTORCH_SRC}/cmake/Dependencies.cmake: -fclang-abi-compat=17 is NOT present."
+            fi
+        fi
+
+        local _hip_path _torch_lib_dir _torch_root _c_ext _ld_debug_log _saved_ld_debug_log
+        _hip_path="$(grep -o '/[^ :]*libtorch_hip\.so' "${_log_file}" | head -n 1 || true)"
+        if [[ -n "${_hip_path}" && -f "${_hip_path}" ]]; then
+            _torch_lib_dir="$(dirname "${_hip_path}")"
+            _torch_root="$(dirname "${_torch_lib_dir}")"
+            _c_ext="$(find "${_torch_root}" -maxdepth 1 -name '_C*.so' | head -n 1 || true)"
+            warn "libtorch_hip.so dynamic section:"
+            readelf -d "${_hip_path}" | grep 'NEEDED\|RPATH\|RUNPATH' || true
+            if command -v ldd >/dev/null 2>&1; then
+                warn "ldd for libtorch_hip.so:"
+                ldd "${_hip_path}" || true
+                if [[ -n "${_c_ext}" && -f "${_c_ext}" ]]; then
+                    warn "ldd for $(basename "${_c_ext}"):"
+                    ldd "${_c_ext}" || true
+                fi
+            fi
+            if command -v nm >/dev/null 2>&1; then
+                warn "Searching installed torch shared libraries for the missing gemm symbol definition..."
+                find "${_torch_root}" -maxdepth 2 -name '*.so' -print0 | while IFS= read -r -d '' _lib; do
+                    if nm -D --defined-only "${_lib}" 2>/dev/null | grep -q '_ZN2at4cuda4blas4gemm'; then
+                        warn "  provider candidate: ${_lib}"
+                    fi
+                done
+            fi
+
+            _ld_debug_log="$(mktemp)"
+            if LD_DEBUG=libs,symbols python -c 'import torch' > /dev/null 2>"${_ld_debug_log}"; then
+                warn "LD_DEBUG import unexpectedly succeeded during diagnostics."
+            else
+                warn "Captured loader trace for failing import."
+                grep -E 'libtorch_hip|_ZN2at4cuda4blas4gemm|symbol lookup error|calling init|find library=' "${_ld_debug_log}" | tail -n 200 || true
+                if [[ -n "${VLLM_DIR:-}" && -d "${VLLM_DIR}" ]]; then
+                    _saved_ld_debug_log="${VLLM_DIR}/torch-import-ld-debug.log"
+                    cp "${_ld_debug_log}" "${_saved_ld_debug_log}"
+                    warn "Full LD_DEBUG trace saved to ${_saved_ld_debug_log}"
+                fi
+            fi
+            rm -f "${_ld_debug_log}"
+        fi
+    fi
+}
+
+retry_pytorch_wheel_install() {
+    local _torch_wheel
+    _torch_wheel="$(newest_wheel "${WHEELS_DIR}"/torch-*.whl)"
+    if [[ -z "${_torch_wheel}" ]]; then
+        warn "Cannot retry PyTorch import recovery: no torch wheel found in ${WHEELS_DIR}"
+        return 1
+    fi
+
+    warn "Retrying PyTorch install from wheel after known ROCm import failure..."
+    python - <<'PY'
+import pathlib
+import shutil
+import site
+
+removed = []
+for base in site.getsitepackages() + [site.getusersitepackages()]:
+    root = pathlib.Path(base)
+    if not root.exists():
+        continue
+    for pattern in ("torch", "torch-*.dist-info", "torch-*.egg-info", "functorch"):
+        for path in root.glob(pattern):
+            if not path.exists():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+            removed.append(str(path))
+
+print("Removed old torch artifacts:" if removed else "No old torch artifacts found.")
+for item in removed:
+    print(f"  {item}")
+PY
+    uv pip install --force-reinstall --no-deps "${_torch_wheel}"
+}
+
+# =============================================================================
 # Bootstrap Tools (uv, yq)
 # =============================================================================
 # uv and yq may not be in system repos on Ubuntu/Fedora. We download
@@ -710,9 +818,12 @@ apply_patches() {
                 p_recursive="$(ycfg ".packages.${pkg_key}.patches[${i}].recursive")"
                 p_mode="$(ycfg ".packages.${pkg_key}.patches[${i}].mode")"
 
-                # Expand shell variables in paths (src/dst may contain ${VAR})
-                p_src="$(eval echo "${p_src}")"
-                p_dst="$(eval echo "${p_dst}")"
+                # Expand ${LOCAL_PREFIX} and ${VLLM_DIR} via bash string
+                # substitution (safe — no eval, no $ORIGIN risk).
+                p_src="${p_src//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                p_src="${p_src//\$\{VLLM_DIR\}/${VLLM_DIR}}"
+                p_dst="${p_dst//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                p_dst="${p_dst//\$\{VLLM_DIR\}/${VLLM_DIR}}"
 
                 if [[ -e "${p_dst}" ]]; then
                     info "  [${i}] $(basename "${p_dst}"): already exists"
@@ -739,9 +850,13 @@ apply_patches() {
                 p_rpath="$(ycfg ".packages.${pkg_key}.patches[${i}].rpath")"
                 p_action="$(ycfg ".packages.${pkg_key}.patches[${i}].action")"
 
-                # Expand shell variables
-                p_target="$(eval echo "${p_target}")"
-                p_rpath="$(eval echo "${p_rpath}")"
+                # Expand ${LOCAL_PREFIX} and ${VLLM_DIR} via bash string
+                # substitution. Avoids eval echo which would expand $ORIGIN
+                # (a dynamic linker token, not a shell variable) to empty.
+                p_target="${p_target//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                p_target="${p_target//\$\{VLLM_DIR\}/${VLLM_DIR}}"
+                p_rpath="${p_rpath//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                p_rpath="${p_rpath//\$\{VLLM_DIR\}/${VLLM_DIR}}"
 
                 info "  [${i}] ${p_description}"
                 local _so
@@ -760,7 +875,8 @@ apply_patches() {
                 p_target="$(ycfg ".packages.${pkg_key}.patches[${i}].target")"
                 p_library="$(ycfg ".packages.${pkg_key}.patches[${i}].library")"
 
-                p_target="$(eval echo "${p_target}")"
+                p_target="${p_target//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                p_target="${p_target//\$\{VLLM_DIR\}/${VLLM_DIR}}"
 
                 if [[ -f "${p_target}" ]] && ! readelf -d "${p_target}" 2>/dev/null | grep -q "${p_library}"; then
                     info "  [${i}] ${p_description}"
@@ -772,6 +888,8 @@ apply_patches() {
 
             patch)
                 p_file="$(ycfg ".packages.${pkg_key}.patches[${i}].path")"
+                p_file="${p_file//\$\{VLLM_DIR\}/${VLLM_DIR}}"
+                p_file="${p_file//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
                 [[ -f "${p_file}" ]] || {
                     warn "  [${i}] Patch file not found: ${p_file}"
                     continue
@@ -1351,7 +1469,8 @@ build_therock() {
           CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE \
           CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS
 
-    ninja -C build
+    export CMAKE_BUILD_PARALLEL_LEVEL=16
+    ninja -j16 -C build
 
     info "Installing TheRock to ${LOCAL_PREFIX}..."
     cmake --install build --prefix "${LOCAL_PREFIX}"
@@ -1631,7 +1750,10 @@ with zipfile.ZipFile('${_torch_wheel}', 'w', zipfile.ZIP_DEFLATED) as zf:
 validate_pytorch() {
     log_step 11 "Validate PyTorch GPU access"
 
-    python -c "
+    local _torch_validate_log
+    _torch_validate_log="$(mktemp)"
+    local _validate_cmd
+    _validate_cmd="$(cat <<'PY'
 import torch
 print(f'  PyTorch version: {torch.__version__}')
 print(f'  CUDA available: {torch.cuda.is_available()}')
@@ -1641,7 +1763,27 @@ if torch.cuda.is_available():
     print(f'  Device count: {torch.cuda.device_count()}')
 else:
     raise RuntimeError('PyTorch cannot see GPU — build may have failed')
-" || die "PyTorch GPU validation failed"
+PY
+)"
+
+    if ! python -c "${_validate_cmd}" >"${_torch_validate_log}" 2>&1; then
+        cat "${_torch_validate_log}" >&2
+        diagnose_pytorch_import_failure "${_torch_validate_log}"
+        if is_known_pytorch_rocm_import_failure "${_torch_validate_log}" && retry_pytorch_wheel_install; then
+            if ! python -c "${_validate_cmd}" >"${_torch_validate_log}" 2>&1; then
+                cat "${_torch_validate_log}" >&2
+                diagnose_pytorch_import_failure "${_torch_validate_log}"
+                rm -f "${_torch_validate_log}"
+                die "PyTorch GPU validation failed after reinstall retry"
+            fi
+        else
+            rm -f "${_torch_validate_log}"
+            die "PyTorch GPU validation failed"
+        fi
+    fi
+
+    cat "${_torch_validate_log}"
+    rm -f "${_torch_validate_log}"
 
     success "PyTorch GPU access verified"
 
@@ -4630,7 +4772,7 @@ handle_rebuild() {
         warn "Removing venv and source directories..."
 
         if [[ -d "${VLLM_VENV}" ]]; then
-            rm -r "${VLLM_VENV}"
+            rm -rf "${VLLM_VENV}"
             info "Removed ${VLLM_VENV}"
         fi
 
@@ -4641,13 +4783,13 @@ handle_rebuild() {
             [[ -z "${pkg_dir}" ]] && continue
             local full_path="${VLLM_DIR}/${pkg_dir}"
             if [[ -d "${full_path}" ]]; then
-                rm -r "${full_path}"
+                rm -rf "${full_path}"
                 info "Removed ${full_path}"
             fi
         done
 
         if [[ -d "${LOCAL_PREFIX}" ]]; then
-            rm -r "${LOCAL_PREFIX}"
+            rm -rf "${LOCAL_PREFIX}"
             info "Removed ${LOCAL_PREFIX}"
         fi
 
@@ -4669,6 +4811,16 @@ main() {
 
     check_prerequisites
     handle_rebuild
+
+    # Create temporary venv for early build steps (TheRock needs Python deps
+    # before CPython is built at step 7). Step 8 (create_venv) will detect
+    # the Python mismatch and recreate with our custom CPython.
+    if [[ ! -d "${VLLM_VENV}" ]]; then
+        info "Creating temporary venv (system Python) for early build steps..."
+        uv venv --python /usr/bin/python3 "${VLLM_VENV}"
+        # shellcheck source=/dev/null
+        source "${VLLM_VENV}/bin/activate"
+    fi
 
     # Set up PATH/LD_LIBRARY_PATH for the unified LOCAL_PREFIX.
     # Duplicates vllm-env.sh logic intentionally: on a fresh build, TheRock

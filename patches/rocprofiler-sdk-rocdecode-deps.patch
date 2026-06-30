@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/profiler/CMakeLists.txt b/profiler/CMakeLists.txt
+index 66c9b12bf..71e86369f 100644
+--- a/profiler/CMakeLists.txt
++++ b/profiler/CMakeLists.txt
+@@ -117,6 +117,8 @@ if(THEROCK_ENABLE_ROCPROFV3)
+     RUNTIME_DEPS
+       aqlprofile
+       hip-clr
++      rocdecode
++      rocjpeg
+       rocprof-trace-decoder
+       rocprofiler-register
+       therock-yaml-cpp

@@ -361,20 +361,23 @@ export AOTRITON_INSTALL_DIR="${_LOCAL_PREFIX}"
 # =============================================================================
 # Lemonade wraps llama.cpp (GPU/CPU), FLM (NPU), and ONNX behind an
 # OpenAI-compatible API. In-place builds under the llama.cpp source tree.
+#
+# llama.cpp binaries use RUNPATH ($ORIGIN:${LOCAL_PREFIX}/lib, set by
+# build-vllm.sh via patchelf), so the install dirs are NOT added to
+# LD_LIBRARY_PATH. This keeps ROCm and Vulkan backend libraries from
+# being mixed by the dynamic loader when Lemonade switches backends.
 
 # ROCm backend (primary — hipBLAS, best prefill <32K context)
 _LLAMACPP_ROCM="${LLAMACPP_SRC}/build-rocm"
 if [[ -d "${_LLAMACPP_ROCM}" ]]; then
     export LEMONADE_LLAMACPP_DIR="${_LLAMACPP_ROCM}"
     export PATH="${_LLAMACPP_ROCM}:${PATH}"
-    export LD_LIBRARY_PATH="${_LLAMACPP_ROCM}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 # Vulkan backend (best generation speed + prefill >32K context on gfx1151)
 _LLAMACPP_VULKAN="${LLAMACPP_SRC}/build-vulkan"
 if [[ -d "${_LLAMACPP_VULKAN}" ]]; then
     export LEMONADE_LLAMACPP_VULKAN_DIR="${_LLAMACPP_VULKAN}"
-    export LD_LIBRARY_PATH="${_LLAMACPP_VULKAN}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 unset _LLAMACPP_ROCM _LLAMACPP_VULKAN
 

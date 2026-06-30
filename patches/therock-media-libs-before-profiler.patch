@@ -1,0 +1,21 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b69ec4476..7ee8a21d3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -496,6 +496,7 @@ add_subdirectory(compiler)
+ add_subdirectory(third-party)
+ add_subdirectory(core)
+ add_subdirectory(debug-tools)
++add_subdirectory(media-libs)
+ # Note that rocprofiler-register is in base and is what higher level clients
+ # depend on. The profiler itself is independent.
+ add_subdirectory(profiler)
+@@ -507,7 +508,6 @@ add_subdirectory(comm-libs)
+ add_subdirectory(storage-libs)
+ add_subdirectory(math-libs)
+ add_subdirectory(ml-libs)
+-add_subdirectory(media-libs)
+ 
+ if(THEROCK_BUILD_TESTING)
+   add_subdirectory(examples)
