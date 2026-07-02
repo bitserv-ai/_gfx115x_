@@ -35,6 +35,47 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
 - **`HIP_VISIBLE_DEVICES`-aware VRAM query** (`vllm-runtime-helpers.sh`):
   `vllm_gpu_total_mb()` now scopes to the first visible GPU and sums APU
   partitions. More robust on multi-partition Strix Halo setups.
+- **`--force-rebuild` CLI flag** (BUILD-FIXES #142, `build-vllm.sh`):
+  `--force-rebuild vllm,aiter` bypasses `should_skip_step()` for the
+  specified packages, enabling targeted rebuilds without `--rebuild`
+  (which wipes everything). Usage:
+  `./build-vllm.sh --step 19 --force-rebuild vllm`
+- **Build pipeline skip markers** (BUILD-FIXES #141, `build-vllm.sh`):
+  `build_vllm()`, `rebuild_aiter()`, and `build_flash_attention()` now
+  call `should_skip_step()` — vLLM's YAML `skip_check` was defined but
+  never invoked (bug). AITER and Flash Attention get new YAML
+  `skip_check` entries (`type: import`). Eliminates ~30 min of
+  unnecessary rebuilds on `--step 19` resume when packages haven't
+  changed.
+- **AITER JIT cache-intact fast path** (BUILD-FIXES #141,
+  `build-vllm.sh`): `warmup_aiter_jit()` short-circuits when all
+  expected `.so` files are present in the JIT directory. Avoids
+  re-importing torch+aiter and iterating 67 modules just to print
+  "already built" for each.
+- **YAML `skip_check` for AITER and Flash Attention**
+  (`vllm-packages.yaml`): New import-based skip checks for `aiter`
+  (`from aiter._version import __version__`) and `flash_attention`
+  (`import flash_attn; print(flash_attn.__version__)`).
+- **New patch files** (16 since v0.4.0, total now 23):
+
+  | Patch | BUILD-FIXES | Target |
+  |-------|-------------|--------|
+  | `aiter-gate-gfx1x.patch` | #133 (R.6) | vLLM — top-level AITER gate for gfx1x |
+  | `aiter-fa-gfx1x-gate.patch` | #133 (R.6) | vLLM — Flash Attention backend gate |
+  | `aiter-fusion-skip-duplicates.patch` | #133 (R.6) | vLLM — 8/8 register_replacement calls |
+  | `fla-chunk-delta-h-gfx1151.patch` | #133 (R.6) | vLLM — 5 FLA fixes |
+  | `fla-chunk-o-gfx1151.patch` | #133 (R.6) | vLLM — 4 FLA fixes |
+  | `spinloop-x86intrin.patch` | #134 | vLLM — Clang 23 `mwaitxintrin.h` guard |
+  | `triton-or-chain-fix.patch` | #135 | vLLM — Triton `or` chain parentheses |
+  | `triton-knobs-import-fix.patch` | #136 | vLLM — `triton.knobs` try/except guard |
+  | `rocr-blit-device-libs.patch` | #112 | TheRock — ROCR blit kernel device-lib-path |
+  | `rocprofiler-sdk-rocdecode-deps.patch` | #115 | TheRock — rocdecode/rocjpeg RUNTIME_DEPS |
+  | `therock-media-libs-before-profiler.patch` | #115 | TheRock — media-libs subdir ordering |
+  | `therock-primlibs-benchmark-deps.patch` | #119 | TheRock — kpack zstandard dep |
+  | `therock-dep-provider-no-registry.patch` | #119 | TheRock — Package Registry shadowing |
+  | `rocblas-roctx-gating.patch` | #105–#112 | TheRock — ROCTX profiler gating |
+  | `rccl-iostream-include.patch` | #117 | TheRock — missing `<iostream>`/`<map>` (GCC 15) |
+  | `miopen-ciso646-warnings.patch` | #119 | TheRock — `<ciso646>` #warning |
 
 ### Changed
 
@@ -42,15 +83,24 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
   to `vllm-start.sh` (matches upstream layout — function is start-specific).
 - **`vllm_log_optimization_state`** retains `VLLM_ENABLE_V1_MULTIPROCESSING`
   line (upstream removed it; we keep it for V1 multiprocessing debugging).
-- **Profiler strategy: fully disabled** (BUILD-FIXES #56/#57 superseded by
-  #105–#112): Replaced hard-wired roctx64 path hacks with proper
-  `THEROCK_ENABLE_PROFILER` gating on all pre-hooks and CMake args. RCCL,
-  rocBLAS, rocSPARSE, hipBLASLt, hipSPARSELt, and MIOpen now skip ROCTX
-  entirely when profiler is off. ROCR-Runtime OpenCL blit kernels get
-  explicit `--rocm-device-lib-path` detection. RCCL tuner macros and NVTX
-  stub mode fixed. From `paudley/ai-notes` BUILD-FIXES #10b–#10h2.
-- **Version-Pin Update** (pre-rebuild Schritt 4a): 12 Komponenten auf neue
-  Commits/Tags aktualisiert in `vllm-packages.yaml`:
+- **vLLM v0.24.0 patch compatibility**: Patch #36 (ViT AITER FA revert)
+  obsolete — upstream now gates on `on_gfx9()` only. Patches #96
+  (enginecore-idle-backoff) and #97 (aiter-fp4-import-fix) regenerated
+  for renamed symbols and shifted line numbers.
+- **vLLM patch refactor (R.6, BUILD-FIXES #133)**: 15 broken/no-op sed
+  patches removed, 5 new git patches created, 2 pre-existing git patches
+  regenerated. Patch count 36→21. All sed substring/marker bugs that
+  caused triple-imports, NameErrors, and partial application eliminated.
+  `clean_generated: true` added to vLLM package to prevent dirty working
+  tree from persisting across builds.
+- **Triton sampler bypass disabled** (BUILD-FIXES #41): Hard-bypass of
+  Triton top-k/top-p sampler on gfx1151 commented out — page fault may
+  be version-specific, not architecture-specific.
+- **TheRock build parallelism**: `CMAKE_BUILD_PARALLEL_LEVEL=16` + `ninja
+  -j16` in `build_therock()` to prevent CPU oversubscription from
+  2-level ninja parallelism.
+- **Version-Pin Update** (pre-rebuild step 4a): 12 components updated to
+  new commits/tags in `vllm-packages.yaml`:
 
   | Komponente | alt | neu |
   |-----------|-----|-----|
@@ -67,117 +117,80 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
   | llama.cpp | `45cac7c` | `6f4f53f` |
   | Lemonade | `d434d8b` (v10.0.0) | `02071764` (**v10.8.1**) |
 
-  Zusätzlich: `build.cpython_version` `3.13.3`→`3.13.9`, vLLM Patch #28
+  Additionally: `build.cpython_version` `3.13.3`→`3.13.9`, vLLM Patch #28
   marker `torch == 2.10.0`→`torch == 2.11.0`.
-- **Lemonade v10.8.1 Config Migration** (Schritt 4c): `config.json`
+- **Lemonade v10.8.1 Config Migration** (step 4c): `config.json`
   `config_version` 1→2, `ctx_size` 4096→-1 (auto-tune).
-  `vllm-packages.yaml` backend_versions.json sed patch aktualisiert:
+  `vllm-packages.yaml` backend_versions.json sed patch updated:
   Marker `"vulkan": "b8"`→`"vulkan": "b9747"`, sed `rocm`→`rocm-stable`+
-  `rocm-nightly` (v10.8.1 hat zwei ROCm-Channel).
+  `rocm-nightly` (v10.8.1 has two ROCm channels).
 
 ### Fixed
 
-- **LD_LIBRARY_PATH library mixing across llama.cpp backends** (BUILD-FIXES #103):
-  Removed redundant `LD_LIBRARY_PATH` exports for llama.cpp ROCm and Vulkan
-  backend directories in `vllm-env.sh`. Binaries already use RUNPATH
-  (`$ORIGIN:${LOCAL_PREFIX}/lib`, set by `build-vllm.sh` via `patchelf` since
-  v0.3.0). The global `LD_LIBRARY_PATH` entries caused library mixing when
-  Lemonade's `llama-swap` switched between backends. Inspired by upstream
-  `paudley/ai-notes` commit `dbfb70e`.
-- **`eval echo` expands `$ORIGIN` as unbound shell variable** (BUILD-FIXES #104):
-  Replaced `eval echo` with Bash string substitution in `patchelf_rpath`,
-  `patchelf_needed`, and `file_copy` handlers in `build-vllm.sh`. Only
-  `${LOCAL_PREFIX}` and `${VLLM_DIR}` are expanded; `$ORIGIN` passes through
-  literally as a dynamic linker token. Eliminates the `\\$ORIGIN` escape
-  convention footgun for future YAML entries.
-- **roctx64 pre-hook gating** (BUILD-FIXES #105): RCCL/rocBLAS/rocSPARSE
-  pre-hooks now gate on `THEROCK_ENABLE_PROFILER`, eliminating the need for
-  hard-wired roctx64 paths (#56/#57 superseded).
-- **RCCL ROCTX tracing disabled** (BUILD-FIXES #106): `-DROCTX=OFF` injected
-  into RCCL CMake args.
-- **RCCL tuner macro definitions** (BUILD-FIXES #107): `#include "plugin/nccl_tuner.h"`
-  added to `rccl_common.h` for `NCCL_NUM_ALGORITHMS`/`NCCL_NUM_PROTOCOLS`.
-- **RCCL NVTX stub mode** (BUILD-FIXES #108): `nvtx.h` now honors
-  `NVTX_NO_IMPL` guard; `nvtx_stub.h` extended with `NCCL_NVTX3_FUNC_RANGE`.
-- **hipBLASLt/hipSPARSELt/MIOpen ROCTX markers** (BUILD-FIXES #109):
-  `-DHIPBLASLT_ENABLE_MARKER=OFF`, `-DHIPSPARSELT_ENABLE_MARKER=OFF`,
-  `-DMIOPEN_USE_ROCTRACER=OFF` injected into CMake args.
-- **rocBLAS roctracer probe** (BUILD-FIXES #110): Probe gated on
-  `BUILD_SHARED_LIBS AND ROCTX`; `DISABLE_ROCTX` compile definition added.
-- **rocSPARSE BUILD_WITH_ROCTX** (BUILD-FIXES #111):
-  `-DBUILD_WITH_ROCTX=OFF` injected into super-project CMake args.
-- **ROCR-Runtime OpenCL blit kernels** (BUILD-FIXES #112): Migrated from
-  inline sed to `.patch` file (`patches/rocr-blit-device-libs.patch`).
-  Previous sed searched `CMAKE_PREFIX_PATH/llvm/amdgcn/bitcode` which does
-  not exist in TheRock's build tree. The patch uses
-  `find_package(AMDDeviceLibs QUIET CONFIG)` to resolve
-  `AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode` via TheRock's dep-provider system,
-  with `CMAKE_PREFIX_PATH`-based fallback for standalone builds.
-- **rocRAND configure: find_package(amd_smi) before project()**
-  (BUILD-FIXES #114): TheRock commit `dd51a250b` added
-  `therock_primlibs_benchmark_deps.cmake` via `CMAKE_INCLUDES`, which runs
-  before `project()`. `find_package(amd_smi)` calls
-  `add_library(SHARED IMPORTED)` while `CMAKE_SYSTEM_NAME` is unset →
-  "target platform does not support dynamic linking". Patch
-  (`patches/therock-primlibs-benchmark-deps.patch`) guards with
-  `if(BUILD_BENCHMARK)`.
-- **`build-vllm.sh` patch handler: `${VLLM_DIR}` expansion** — the `patch`
-  type in `apply_patches()` now expands `${VLLM_DIR}` and `${LOCAL_PREFIX}`
-  in the `path` field, matching the existing behavior of `patchelf_rpath`
-  and `file_copy` handlers.
-- **rocprofiler-sdk configure: rocdecode/rocjpeg missing from RUNTIME_DEPS**
-  (BUILD-FIXES #115): rocprofiler-sdk calls `find_package(rocdecode)` and
-  `find_package(rocjpeg)` in `rocprofiler_config_interfaces.cmake`, but
-  TheRock did not declare them as `RUNTIME_DEPS` for rocprofiler-sdk. With
-  `EXCLUDE_FROM_ALL`, rocdecode was only configured but never built/staged,
-  leaving `rocdecode-config.cmake` incomplete (missing
-  `rocdecode-targets.cmake` and include dir). Patch
-  (`patches/rocprofiler-sdk-rocdecode-deps.patch`) adds rocdecode and rocjpeg
-  to `RUNTIME_DEPS` in `profiler/CMakeLists.txt`. Follow-up patch
-  (`patches/therock-media-libs-before-profiler.patch`) moves
-  `add_subdirectory(media-libs)` before `add_subdirectory(profiler)` in
-  TheRock's root `CMakeLists.txt`, because `therock_cmake_subproject_declare`
-  requires `RUNTIME_DEPS` targets to already exist when processing
-  `profiler/CMakeLists.txt`.
-- **Triton sampler bypass disabled** (BUILD-FIXES #41): The hard-bypass
-  of the Triton top-k/top-p sampler on gfx1151 is commented out in
-  `vllm-packages.yaml`. The page fault may be version-specific rather than
-  architecture-specific. The next rebuild will test whether the Triton
-  sampler works without the bypass.
-- **PyTorch ROCm import failure diagnostics and auto-recovery**
-  (BUILD-FIXES #113): `validate_pytorch()` in `build-vllm.sh` now detects
-  the known `libtorch_hip.so: undefined symbol: _ZN2at4cuda4blas4gemm`
-  failure, dumps diagnostics (LD_DEBUG trace, readelf, ldd, nm), and
-  attempts a one-time clean wheel reinstall before giving up. Three new
-  helper functions: `is_known_pytorch_rocm_import_failure()`,
-  `diagnose_pytorch_import_failure()`, `retry_pytorch_wheel_install()`.
-  From `paudley/ai-notes` (Dillflix via PR #14).
-- **Patch #36 (ViT AITER FA revert) obsolete** (BUILD-FIXES #36): vLLM
-  v0.24.0 now gates ViT AITER FA on `on_gfx9()` only — the
-  `on_gfx9() or on_gfx1x()` marker no longer exists. Patch auto-skipped.
-- **`enginecore-idle-backoff.patch` regenerated** (BUILD-FIXES #96) for
-  vLLM v0.24.0: `has_unfinished_requests()` → `has_requests()` rename,
-  updated line numbers. `git apply --check` passes.
-- **`aiter-fp4-import-fix.patch` regenerated** (BUILD-FIXES #97) for
-  vLLM v0.24.0: line numbers shifted (1235→1731), third occurrence
-  (`is_tgemm_enabled`) added. All three `on_gfx950()` → `on_gfx9()`.
-- **`handle_rebuild()` read-only packfiles** (`build-vllm.sh`): `rm -r`
-  → `rm -rf` at 3 locations. Git packfiles (`.pack`) are read-only;
-  `rm -r` fails with permission denied during `--rebuild` cleanup.
-- **Temp venv creation before Step 8** (`build-vllm.sh`): TheRock (Step 3)
-  requires Python build dependencies (`mako`, `jinja2`, etc.) that must
-  be installed in a venv. Since CPython (Step 7) builds the final venv,
-  a temporary venv with system Python is now created before TheRock
-  configure to avoid `pip install` failures.
-- **TheRock build parallelism limited** (`build-vllm.sh`):
-  `CMAKE_BUILD_PARALLEL_LEVEL=16` env var + `ninja -j16` in
-  `build_therock()`. TheRock uses 2-level parallelism (outer ninja
-  schedules sub-projects, each spawning its own ninja). Without the
-  env var, inner ninja inherits `-j$(nproc)` causing CPU oversubscription
-  and thermal throttling.
-- **`mako` added to `therock.build_dependencies`** (`vllm-packages.yaml`):
-  TheRock's mesa sub-project requires the `mako` Python package at build
-  time. Was missing from build dependencies, causing configure failure.
+- **LD_LIBRARY_PATH library mixing** (BUILD-FIXES #103): Removed redundant
+  exports for llama.cpp backends in `vllm-env.sh`. Binaries use RUNPATH.
+- **`eval echo` `$ORIGIN` expansion** (BUILD-FIXES #104): Replaced with
+  Bash string substitution in patchelf handlers.
+- **Profiler/ROCTX fully disabled** (BUILD-FIXES #105–#112): All ROCTX
+  paths, CMake args, and pre-hooks gated on `THEROCK_ENABLE_PROFILER`.
+  RCCL, rocBLAS, rocSPARSE, hipBLASLt, hipSPARSELt, MIOpen. ROCR blit
+  kernels get explicit device-lib-path. Migrated to `.patch` files.
+- **PyTorch ROCm import diagnostics** (BUILD-FIXES #113): Auto-detects
+  known `libtorch_hip.so` symbol failure, dumps diagnostics, retries
+  wheel install.
+- **TheRock configure/build fixes** (BUILD-FIXES #114–#119): rocRAND
+  `find_package(amd_smi)` before `project()`; rocprofiler-sdk
+  rocdecode/rocjpeg RUNTIME_DEPS + media-libs ordering; rccl missing
+  `<iostream>`/`<map>`/`<string>` (GCC 15); kpack `zstandard` dep;
+  dep-provider Package Registry shadowing; MIOpen `<ciso646>` #warning.
+- **TheRock build scope & configure** (BUILD-FIXES #120–#123):
+  `THEROCK_TEST_AMDGPU_TARGETS=gfx1151` + 6 component disables;
+  `configure_therock()` call added to `build_therock()`; `CC`/`CXX`
+  unset before TheRock cmake; rccl patch CRLF fix.
+- **Configure deps fixes** (BUILD-FIXES #124–#125): CppHeaderParser
+  installed into venv; AOCL-LibM amdclang PATH export.
+- **PyTorch family build fixes** (BUILD-FIXES #126–#129): Submodule
+  init for hipify; `ROCM_SOURCE_DIR` export + stale cache detection;
+  `libomp.so` NEEDED on `libtorch_cpu.so`; TorchVision
+  `setuptools<81`.
+- **AOTriton/Triton build fixes** (BUILD-FIXES #130–#132): Triton
+  submodule init; both backends loaded (`["amd", "nvidia"]`) for NVWS
+  dialect dependency; GSan CUDA runtime disabled; `TRITON_BUILD_UT=OFF`;
+  `git checkout` restoration for idempotent patch retries.
+- **vLLM v0.24.0 patch refactor** (BUILD-FIXES #133): 15 sed patches
+  broken by upstream API renames (`TORCH_CHECK`→`STD_TORCH_CHECK`,
+  `at::ScalarType`→`torch::headeronly::ScalarType`, `FLA_GDN_FIX_BT`→
+  `FLA_CHUNK_SIZE`, `KV_DTYPE` string→`KV_CACHE_DTYPE` enum), removed
+  code paths (`is_eager_execution`, offload assertion, FLA warmup loop),
+  and sed substring/marker bugs (triple-import, 3/8 skip_duplicates,
+  NameError from unimported `is_amd`). 5 new git patches + 2 regenerated.
+- **spinloop.cpp Clang 23 compatibility** (BUILD-FIXES #134):
+  `mwaitxintrin.h` → `x86intrin.h` — Clang 23 forbids direct inclusion
+  of sub-architecture intrinsics headers.
+- **Triton chained `or` parse error** (BUILD-FIXES #135): Triton
+  `main_perf` rejects `A or B or C` without parentheses. Added
+  explicit grouping `(A or B) or C` in `penalties.py`.
+  `triton-or-chain-fix.patch`.
+- **Triton `knobs` module missing** (BUILD-FIXES #136): `triton.knobs`
+  does not exist in `main_perf` @ `0ec280cf`. Wrapped both
+  `from triton import knobs` calls in `jit_monitor.py` with
+  `try/except ImportError`. `triton-knobs-import-fix.patch`.
+- **EngineCore HIP corruption on fork** (BUILD-FIXES #137): AITER `.so`
+  modules partially initialize the HIP runtime at import time via
+  dlopen constructors. `fork()` passes corrupted state to the child,
+  causing `hipErrorInvalidValue`. `VLLM_WORKER_MULTIPROC_METHOD=spawn`
+  added to `vllm-env.sh`.
+- **llama.cpp ROCm libomp.so missing** (BUILD-FIXES #138): ROCm backend
+  call to `finalize_llamacpp_backend()` passed `"skip"` for libomp
+  copy, but `libomp.so` lives at `${LOCAL_PREFIX}/llvm/lib/` — outside
+  RUNPATH `$ORIGIN:${LOCAL_PREFIX}/lib`. Removed `"skip"` argument
+  so libomp.so is copied to the backend directory.
+- **llama.cpp shallow clone misses pinned commit** (BUILD-FIXES #139):
+  `shallow: true` fetches only branch HEAD; pinned commit `6f4f53f`
+  was not HEAD. Changed to `shallow: false` in `vllm-packages.yaml`.
+- **`pipeline_model_parallel_size` → `pipeline_parallel_size`**
+  (BUILD-FIXES #140): v0.24.0 renamed the `ParallelConfig` attribute.
+  Updated `skip-distributed-single-gpu.patch` to use the new name.
 
 ## [0.4.0] - 2026-06-29
 
@@ -189,19 +202,19 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
 
 ### Added
 
-- **W8A16 Quantisierung**: `quantize_w8a16.py` Skript (llmcompressor + RTN)
-  für Qwen3-VL-Embedding und Reranker. 9.9 GiB/Modell vs. 17.3 GiB BF16.
-- **AITER W8A16 Benchmarks**: 3.5× Embed-Warm-Speedup (0.56s → 0.16s),
-  8.5× Reranker-Warm-Speedup (1.51s → 0.178s). Determinismus CosSim = 1.0.
+- **W8A16 Quantization**: `quantize_w8a16.py` script (llmcompressor + RTN)
+  for Qwen3-VL-Embedding and Reranker. 9.9 GiB/model vs. 17.3 GiB BF16.
+- **AITER W8A16 Benchmarks**: 3.5× Embed warm speedup (0.56s → 0.16s),
+  8.5× Reranker warm speedup (1.51s → 0.178s). Determinism CosSim = 1.0.
 - **Concurrent Pipeline**: Embed+Reranker parallel in 0.32s.
-- **30-Min Burn-Test**: 8344 Requests, 0 Errors, VRAM-Delta +0.000 GiB.
-- **AITER JIT Cache**: Cold-Start ~16 Min, danach 0 s (via `~/.triton/cache/`
-  + `~/.cache/vllm/`). Startup-Timeout 1200 s in `.env`.
+- **30-Min Burn-Test**: 8344 requests, 0 errors, VRAM delta +0.000 GiB.
+- **AITER JIT Cache**: Cold start ~16 min, then 0 s (via `~/.triton/cache/`
+  + `~/.cache/vllm/`). Startup timeout 1200 s in `.env`.
 - **Dual-Instance via `.env`**: `VLLM_ROLES=dual`, `VLLM_ROCM_USE_AITER=1`.
-- **Patch Policy** (`AGENTS.md`): Neu → `.patch`-Files, Bestand → inline;
-  YAML bleibt Source of Truth.
-- **`patches/`-Verzeichnis**: 7 `.patch`-Files ins Repo eingebracht
-  (v0.3.0 hatte keine versionierten Patches):
+- **Patch Policy** (`AGENTS.md`): New → `.patch` files, existing → inline;
+  YAML remains source of truth.
+- **`patches/` directory**: 7 `.patch` files added to repo
+  (v0.3.0 had no versioned patches):
   `aiter-fp4-import-fix.patch` (#97),
   `fp8-e5m2-quant-utils.patch` (#92/#93),
   `enginecore-idle-backoff.patch` (#96),
@@ -209,17 +222,17 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
   `skip-distributed-single-gpu.patch` (#102),
   `cmake-zen4-only.patch` (#80),
   `grammar-max-rep-threshold.patch` (#81).
-- **QWEN3-INT8-QUANT.md**: Neues Engineering-Dokument — INT8-Quantisierungs-
-  Strategie (W8A16 Production, W8A8 Failure Analysis, AITER Unlock,
-  Kernel Dispatch, Memory Budget, Performance Benchmarks).
+- **QWEN3-INT8-QUANT.md**: New engineering document — INT8 quantization
+  strategy (W8A16 production, W8A8 failure analysis, AITER unlock,
+  kernel dispatch, memory budget, performance benchmarks).
 
 ### Changed
 
-- **QWEN3-VL-EMBED.md**: Vollständig überarbeitet. Aktuelle Abschnitte:
+- **QWEN3-VL-EMBED.md**: Fully revised. Current sections:
   Model Details, vLLM Runtime Adaptations, vLLM Server Configuration,
   HTTP API Reference, Memory Tuning & Alternative Configurations.
 - **`.gitignore`**: `testing/`, `techdoc/`, `TODO.md`, `drafts/`, `_backup/`
-  unter "bitserv-ai internal" zusammengefasst.
+  consolidated under "bitserv-ai internal".
 
 ### Fixed
 
@@ -235,8 +248,8 @@ Skipped: duckdb wheel addition (not needed for inference stack), llamacpp branch
   instance. `patches/skip-distributed-single-gpu.patch`.
 - **AITER FP4 Import** (`_aiter_ops.py`): `on_gfx950()` → `on_gfx9()`
   (BUILD-FIXES #97, YAML patch #34).
-- **FP8 E5M2 C++ Typen** (`quant_utils.cuh`): `.patch`-File verfügbar,
-  vorher untracked live-edit (BUILD-FIXES #92/#93, YAML patch #35).
+- **FP8 E5M2 C++ Types** (`quant_utils.cuh`): `.patch` file available,
+  previously untracked live-edit (BUILD-FIXES #92/#93, YAML patch #35).
 - **`clone_pkg()` submodule pull protection** (BUILD-FIXES #98):
   `--no-recurse-submodules`, `--ff-only`, detached-HEAD guard,
   explicit `git submodule sync --recursive`. Cherry-picked from

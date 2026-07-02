@@ -1,9 +1,9 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh b/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh
-index 81f5cb83f..6dd2abf40 100644
+index 58d19de73..c1a9dac5c 100644
 --- a/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh
 +++ b/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh
-@@ -66,6 +66,11 @@ using fp8_type = __hip_fp8_e4m3_fnuz;
+@@ -67,6 +67,11 @@ using fp8_type = __hip_fp8_e4m3_fnuz;
  using fp8x2_type = __hip_fp8x2_e4m3_fnuz;
      #endif
  
@@ -15,7 +15,7 @@ index 81f5cb83f..6dd2abf40 100644
  // fp8 -> half
  template <>
  __inline__ __device__ uint16_t
-@@ -612,11 +617,260 @@ scaled_vec_conversion<uint32_t, float4>(const float4& a, float scale) {
+@@ -613,11 +618,260 @@ scaled_vec_conversion<uint32_t, float4>(const float4& a, float scale) {
  }
    #endif  // ENABLE_FP8
  
@@ -276,7 +276,7 @@ index 81f5cb83f..6dd2abf40 100644
    }
    #endif
    assert(false);
-@@ -628,6 +882,8 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
+@@ -629,6 +883,8 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
    #ifdef ENABLE_FP8
    if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
      return scaled_vec_conversion<Tout, Tin>(x, scale);
@@ -285,24 +285,24 @@ index 81f5cb83f..6dd2abf40 100644
    }
    #endif
    assert(false);
-@@ -661,6 +917,20 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
-           TORCH_CHECK(false,                                                   \
-                       "Unsupported input type of kv cache: ", SRC_DTYPE);      \
-         }                                                                      \
-+      } else if (KV_DTYPE == "fp8_e5m2") {                                    \
-+        if (SRC_DTYPE == at::ScalarType::Float) {                              \
-+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);              \
-+        } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
-+          TORCH_CHECK(false,                                                   \
-+                      "fp8_e5m2 KV cache with fp16 model not supported on "   \
-+                      "RDNA 3+ (gfx11xx). Use bfloat16 model or "             \
-+                      "--kv-cache-dtype auto.");                               \
-+        } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
-+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);      \
-+        } else {                                                               \
-+          TORCH_CHECK(false,                                                   \
-+                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
-+        }                                                                      \
-       } else {                                                                 \
-         TORCH_CHECK(false, "Unsupported data type of kv cache: ", KV_DTYPE);   \
+@@ -664,6 +920,20 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
+         STD_TORCH_CHECK(false,                                                 \
+                         "Unsupported input type of kv cache: ", SRC_DTYPE);    \
        }                                                                        \
++    } else if (KV_CACHE_DTYPE == vllm::Fp8KVCacheDataType::kFp8E5M2) {         \
++      if (SRC_DTYPE == torch::headeronly::ScalarType::Float) {                 \
++        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);                \
++      } else if (SRC_DTYPE == torch::headeronly::ScalarType::Half) {           \
++        STD_TORCH_CHECK(false,                                                 \
++                        "fp8_e5m2 KV cache with fp16 model not supported on "  \
++                        "RDNA 3+ (gfx11xx). Use bfloat16 model or "            \
++                        "--kv-cache-dtype auto.");                             \
++      } else if (SRC_DTYPE == torch::headeronly::ScalarType::BFloat16) {       \
++        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);        \
++      } else {                                                                 \
++        STD_TORCH_CHECK(false,                                                 \
++                        "Unsupported input type of kv cache: ", SRC_DTYPE);    \
++      }                                                                        \
+     } else {                                                                   \
+       STD_TORCH_CHECK(false, "Unsupported data type of kv cache: ", KV_DTYPE); \
+     }

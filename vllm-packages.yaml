@@ -274,6 +274,7 @@ packages:
       - pyyaml
       - pytest
       - mako
+      - zstandard
     notes: |
       TheRock MUST be built with GCC -- rocprofiler-systems has an explicit
       GNU compiler check that blocks Clang. TheRock produces amdclang (AMD's
@@ -484,6 +485,15 @@ packages:
         marker_absent: true
         sed_command: '/-DMIOPEN_USE_COMPOSABLEKERNEL=/a\      -DMIOPEN_USE_ROCTRACER=OFF'
 
+      # 14. MIOpen ciso646 #warning with GCC 15 + C++20 (BUILD-FIXES #119)
+      - type: patch
+        path: "${VLLM_DIR}/patches/miopen-ciso646-warnings.patch"
+        description: >-
+          GCC 15's ciso646 header emits a #warning ("ciso646 is not a
+          standard header since C++20") which becomes a hard error under
+          MIOpen's -Werror. Add -Wno-#warnings to Clang-specific compile
+          options in EnableCompilerWarnings.cmake.
+
       # 12. Disable rocBLAS ROCTX integration when profiler stack is disabled (BUILD-FIXES #110)
       - type: sed
         file: math-libs/BLAS/CMakeLists.txt
@@ -496,28 +506,18 @@ packages:
         marker_absent: true
         sed_command: '0,/-DLINK_BLIS=OFF/s//-DLINK_BLIS=OFF\n    -DROCTX=OFF/'
 
-      - type: sed
-        file: rocm-libraries/projects/rocblas/library/CMakeLists.txt
+      # 11+12. rocBLAS ROCTX gating (BUILD-FIXES #110) — migrated from sed to patch
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocblas-roctx-gating.patch"
         description: >-
           Gate rocBLAS's shared-library ROCTX header/library probing on the
-          ROCTX cache option as well. Upstream currently probes roctracer/roctx.h
-          whenever BUILD_SHARED_LIBS is on, so TheRock still fails in
-          projects/rocblas/library/CMakeLists.txt even when -DROCTX=OFF was
-          injected at the super-project layer.
-        marker: 'if(BUILD_SHARED_LIBS AND ROCTX)'
-        marker_absent: true
-        sed_command: 's|if(BUILD_SHARED_LIBS)|if(BUILD_SHARED_LIBS AND ROCTX)|'
-
-      - type: sed
-        file: rocm-libraries/projects/rocblas/library/CMakeLists.txt
-        description: >-
-          When ROCTX is explicitly disabled, still define DISABLE_ROCTX for
-          rocBLAS sources before the shared-library probe block. This keeps
-          files like logging.cpp from including roctracer/roctx.h after the
-          find_path()/find_library() probe itself has been skipped.
-        marker: 'add_compile_definitions("DISABLE_ROCTX")'
-        marker_absent: true
-        sed_command: '/--unwindlib=libgcc)/a \\\n  if(NOT ROCTX)\n    add_compile_definitions("DISABLE_ROCTX")\n  endif()'
+          ROCTX cache option. Upstream probes roctracer/roctx.h whenever
+          BUILD_SHARED_LIBS is on, so TheRock still fails even when
+          -DROCTX=OFF was injected at the super-project layer. Also adds
+          DISABLE_ROCTX compile definition when ROCTX is off, keeping
+          logging.cpp from including roctracer/roctx.h. Migrated from two
+          sed entries to a single .patch file because the sed append
+          command inserted literal \n instead of real newlines.
 
       # 13. Disable rocSPARSE BUILD_WITH_ROCTX when profiler stack is disabled (BUILD-FIXES #111)
       - type: sed
@@ -582,7 +582,7 @@ packages:
         marker_absent: true
         sed_command: '/#define ELFTYPES_H/i #include <cstdint>'
 
-      # 18. Guard primlibs benchmark deps find_package(amd_smi) with BUILD_BENCHMARK (BUILD-FIXES #113)
+      # 18. Guard primlibs benchmark deps find_package(amd_smi) with BUILD_BENCHMARK (BUILD-FIXES #114)
       - type: patch
         path: "${VLLM_DIR}/patches/therock-primlibs-benchmark-deps.patch"
         description: >-
@@ -621,6 +621,38 @@ packages:
           before profiler. rocdecode/rocjpeg only depend on base, core, and
           third-party/sysdeps (all processed before both), so this reordering
           is safe.
+
+      # 21. rccl missing <iostream>/<map>/<string> for std::cerr/std::map/std::string (BUILD-FIXES #116)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rccl-iostream-include.patch"
+        description: >-
+          rccl's ipc_init.cu defines a HIP_CALL macro that uses std::cerr
+          without including <iostream>. net.cc uses std::map and
+          std::string without including <map>/<string>. Modern compilers
+          (GCC 15+, Clang 21+) removed transitive includes. The patch adds
+          source-level #include directives to ipc_init.cu and net.cc.
+          Previous approach used target_compile_options(-include ...) in
+          CMakeLists.txt, but CMake de-duplicates multiple -include flags
+          into a single -include with space-separated args, which clang
+          interprets as input filenames. Source-level #include avoids
+          this CMake flag-merging issue and is incremental-safe.
+
+      # 22. dep-provider: NO_CMAKE_PACKAGE_REGISTRY (BUILD-FIXES #118)
+      - type: patch
+        path: "${VLLM_DIR}/patches/therock-dep-provider-no-registry.patch"
+        description: >-
+          TheRock's dep-provider rewrites find_package() with NO_DEFAULT_PATH
+          but omits NO_CMAKE_PACKAGE_REGISTRY. CMake's NO_DEFAULT_PATH does
+          NOT exclude the User Package Registry (~/.cmake/packages/).
+          Subprojects like rocdecode call export(PACKAGE) which registers
+          their build/ directory in the registry. When a later subproject
+          (e.g. rocprofiler-sdk) calls find_package(rocdecode), CMake finds
+          the build/ version via the registry instead of the dist/ version
+          from PATHS. The build/ rocdecode-config.cmake resolves
+          PACKAGE_PREFIX_DIR incorrectly (build/../../../ → wrong path),
+          causing FATAL_ERROR on missing include dirs. Adding
+          NO_CMAKE_PACKAGE_REGISTRY forces CMake to use only the explicit
+          PATHS from the dep-provider.
 
     environment:
       BUILD_DOCS: "OFF"
@@ -1067,9 +1099,12 @@ packages:
       TORCH_CUDA_ARCH_LIST: ""
       FORCE_CUDA: "0"
       FORCE_MPS: "0"
+    build_dependencies:
+      - "setuptools<81"
     notes: |
       Built against source PyTorch (must find torch headers in pytorch/
-      source tree, not from a pip install).
+      source tree, not from a pip install). setuptools<81 needed because
+      v0.24.1's setup.py imports pkg_resources (removed in setuptools 81+).
 
   # ---------------------------------------------------------------------------
   # Phase D: Kernel Compilers
@@ -1198,6 +1233,7 @@ packages:
     depends_on: [pytorch, triton, aotriton]
     compiler: amdclang
     skip_marker: null
+    clean_generated: true
     skip_check:
       type: import
       command: "import torch; import vllm; assert torch.cuda.is_available(), 'vLLM/PyTorch ABI Mismatch or GPU init failure'"
@@ -1251,61 +1287,27 @@ packages:
           ROCm initialization if loaded after torch. Uses Python script
           to insert after module docstring.
 
-      # 2. AITER gfx11 support: extend _aiter_ops.py
-      - type: sed
-        file: "vllm/_aiter_ops.py"
-        marker: "on_gfx1x"
-        marker_absent: true
-        sed_command: "s/from vllm.platforms.rocm import on_gfx9/from vllm.platforms.rocm import on_gfx9, on_gfx1x/"
+      # 2. AITER top-level gate: open for gfx1x (replaces broken sed patches)
+      - type: patch
+        path: "${VLLM_DIR}/patches/aiter-gate-gfx1x.patch"
         description: >
-          Extend AITER architecture check to accept gfx11 (RDNA 3.5).
-          vLLM upstream gates AITER on on_gfx9() which returns False for
-          gfx1151. The AMD fork's AITER has full gfx1151 support
-          (chip_info.py enum 13, fwd_prefill.py RDNA 3.5 tuning).
+          Open is_aiter_found_and_supported() for gfx1x (RDNA 3.5).
+          Changes import to on_mi3xx, on_gfx1x and return to
+          on_mi3xx() or on_gfx1x(). Without this, AITER is completely
+          disabled on gfx1151 — all @if_aiter_supported functions
+          return None. Replaces old sed patches that were no-ops
+          (target return on_gfx9() didn't exist in v0.24.0).
 
-      # 3. AITER gfx11 support: extend _aiter_ops.py return statement
-      - type: sed
-        file: "vllm/_aiter_ops.py"
-        marker: "on_gfx9() or on_gfx1x()"
-        marker_absent: true
-        sed_command: "s/return on_gfx9()/return on_gfx9() or on_gfx1x()/"
+      # 3. AITER FA backend: extend rocm_aiter_fa.py for gfx1x
+      - type: patch
+        path: "${VLLM_DIR}/patches/aiter-fa-gfx1x-gate.patch"
         description: >
-          Update is_aiter_found_and_supported() return to include gfx1x.
-          Companion to the import patch above -- both are needed.
-
-      # 4. AITER FA backend: extend rocm_aiter_fa.py
-      - type: sed
-        file: "vllm/v1/attention/backends/rocm_aiter_fa.py"
-        marker: "on_gfx1x"
-        marker_absent: true
-        sed_command: "s/on_mi3xx()/on_mi3xx() or on_gfx1x()/"
-        description: >
-          Extend ROCM_AITER_FA attention backend to accept gfx1x.
-          rocm_aiter_fa.py gates on on_mi3xx() which is MI300X-only.
-          gfx1151 AITER attention kernels are tuned and functional.
-
-      # 5. AITER FA backend: add on_gfx1x import
-      - type: sed
-        file: "vllm/v1/attention/backends/rocm_aiter_fa.py"
-        marker: "import on_gfx1x"
-        marker_absent: true
-        sed_command: "s/from vllm.platforms.rocm import on_mi3xx/from vllm.platforms.rocm import on_mi3xx, on_gfx1x/"
-        description: >
-          Add on_gfx1x to imports in rocm_aiter_fa.py. Required by the
-          on_mi3xx() or on_gfx1x() check added in patch 4.
-
-      # 6. ViT backend: KEEP gfx9-only (revert if previously patched)
-      - type: sed
-        file: "vllm/platforms/rocm.py"
-        marker: "on_gfx9() or on_gfx1x()"
-        marker_present: true
-        sed_command: "s/rocm_aiter_ops.is_enabled() and (on_gfx9() or on_gfx1x())/rocm_aiter_ops.is_enabled() and on_gfx9()/"
-        description: >
-          REVERT ViT AITER FA to gfx9-only. The CK fmha_fwd kernel
-          rejects ViT attention dimensions (head_dim, seq_len combos) on
-          gfx1151 with "invalid argument for fmha_fwd". Decoder attention
-          (unified + FA) works fine on gfx1x but the ViT encoder path
-          must fall through to TRITON_ATTN on RDNA 3.5.
+          Extend AiterFlashAttentionBackend.supports_compute_capability()
+          to accept gfx1x. Changes import and return same as patch 2
+          but in rocm_aiter_fa.py. Replaces two broken sed patches
+          that had a marker bug causing triple on_gfx1x imports.
+          ViT FA stays gfx9-only — upstream v0.24.0 already gates
+          on on_gfx9() in rocm.py, no revert needed.
 
       # 7. FP8 linear: disable AITER CK GEMM on gfx1x
       - type: file_rewrite
@@ -1323,35 +1325,19 @@ packages:
           which uses pure Triton and works on all architectures.
         note: "Content is inline Python in build-vllm.sh (multi-line replacement)"
 
-      # 8. Block +rms_norm custom_ops on gfx1x (Inductor codegen bug)
-      - type: sed
-        file: "vllm/platforms/rocm.py"
-        marker: "not on_gfx1x()"
-        marker_absent: true
-        sed_command: "/and not is_eager_execution/a\\            and not on_gfx1x()"
-        description: >
-          Block +rms_norm from custom_ops on gfx1x (RDNA 3/4). Adding
-          +rms_norm causes torch.compile/Inductor to generate incorrect code
-          at graph partition boundaries, producing garbage output on gfx1151.
-          Both CK and Triton RMSNorm kernels are correct in isolation; the
-          bug is purely in Inductor's graph restructuring when RMSNorm is
-          declared as an opaque custom op barrier. With this guard, RMSNorm
-          stays inline and gets fused normally by the compiler.
+      # 6. Block +rms_norm custom_ops on gfx1x — REMOVED (R.6.5)
+      # is_eager_execution doesn't exist in v0.24.0. CK RMSNorm on gfx1x
+      # is handled by file_rewrite patches 9+10 (Triton dispatch replacement).
 
-      # 9. Duplicate pattern: add skip_duplicates to AITER fusion pattern registration (was #8)
-      - type: sed
-        file: "vllm/compilation/passes/fusion/rocm_aiter_fusion.py"
-        marker: "skip_duplicates"
-        marker_absent: true
-        sed_command: "/pm\\.register_replacement(/,/)/{ s/pm_pass,$/pm_pass, skip_duplicates=True,/; s/pm_pass$/pm_pass, skip_duplicates=True/ }"
+      # 7. AITER fusion: skip_duplicates for all register_replacement calls
+      - type: patch
+        path: "${VLLM_DIR}/patches/aiter-fusion-skip-duplicates.patch"
         description: >
-          Add skip_duplicates=True to all pm.register_replacement() calls in
-          rocm_aiter_fusion.py. The RocmAiterRMSNormQuantFusionPass registers
-          patterns in a loop over epsilon × match_aiter_quant combinations.
-          Some combinations produce identical pattern graphs (especially on
-          non-FP8 architectures like gfx1151), causing torch's pattern_matcher
-          to raise "RuntimeError: Duplicate pattern" and crash the engine.
-          This prevents torch.compile from working, forcing --enforce-eager.
+          Add skip_duplicates=True to all 8 pm.register_replacement()
+          calls in rocm_aiter_fusion.py. Prevents torch pattern_matcher
+          "Duplicate pattern" RuntimeError on non-FP8 architectures like
+          gfx1151. Replaces old sed that only hit 3/8 calls due to
+          premature range termination at self.empty() closing paren.
 
       # 10. Triton sampler bypass — DISABLED: testing upstream behavior (BUILD-FIXES #41)
       # The Triton top-k/top-p kernel page-faulted on gfx1151 after torch.compile
@@ -1374,96 +1360,16 @@ packages:
       #     (apply_top_k_top_p_pytorch) is functionally identical and works
       #     correctly on all architectures.
 
-      # 11. FLA chunk_delta_h: AMD autotune restrict + exp() float32 cast
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_delta_h.py"
-        marker: "is_amd"
-        marker_absent: true
-        sed_command: "s/from .utils import use_cuda_graph/from .utils import is_amd, use_cuda_graph/"
+      # 9. FLA chunk_delta_h: AMD autotune restrict + exp() float32 cast
+      - type: patch
+        path: "${VLLM_DIR}/patches/fla-chunk-delta-h-gfx1151.patch"
         description: >
-          Import is_amd flag from utils for conditional autotune configuration
-          in chunk_delta_h.py. Part 1 of 3 for the FLA AMD fixes.
-
-      # 12. FLA chunk_delta_h: restrict autotune search on AMD
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_delta_h.py"
-        marker: "if is_amd else"
-        marker_absent: true
-        sed_command: >
-          /for num_stages in \[2, 3, 4\]/{
-            s|for num_stages in \[2, 3, 4\]|# NOTE(gfx1151): On AMD HIP, restrict autotune search to num_stages=2\n        # and BV=32. Higher stages and BV=64 with K>64 produce code that\n        # causes GPU page faults during autotuning on RDNA 3.5 (wave32).\n        for num_stages in ([2] if is_amd else [2, 3, 4])|
-          }
-        description: >
-          Restrict Triton autotune search to num_stages=2 on AMD HIP. Higher
-          pipeline stages cause GPU page faults during autotuning on RDNA 3.5
-          (gfx1151, wave32). The CDNA path (gfx9) retains the full search.
-
-      # 13. FLA chunk_delta_h: restrict BV autotune on AMD
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_delta_h.py"
-        marker: "\\[32\\] if is_amd"
-        marker_absent: true
-        sed_command: "s/for BV in \\[32, 64\\]/for BV in ([32] if is_amd else [32, 64])/"
-        description: >
-          Restrict Triton autotune BV to 32 on AMD HIP. BV=64 with K>64
-          produces kernels that page-fault on RDNA 3.5 during autotuning.
-
-      # 14. FLA chunk_delta_h: cast exp() operands to float32 on HIP
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_delta_h.py"
-        marker: "b_g_diff"
-        marker_absent: true
-        sed_command: >
-          /b_v = b_v \* tl.where(m_t, exp(b_g_last - b_g), 0)/{
-            s|            b_v = b_v \* tl.where(m_t, exp(b_g_last - b_g), 0)\[:, None\]|            # NOTE(gfx1151): Triton HIP compiler fails to infer types for\n            # exp(scalar_bf16 - block_ptr_load_bf16).  Cast to float32 first\n            # (also gives better precision for exp computation).\n            b_g_diff = b_g_last.to(tl.float32) - b_g.to(tl.float32)\n            b_v = b_v * tl.where(m_t, exp(b_g_diff), 0)[:, None]|
-          }
-        description: >
-          Cast exp() operands to float32 before subtraction in FLA
-          chunk_delta_h kernel. The Triton HIP compiler fails to infer types
-          correctly for exp(scalar_bf16 - block_ptr_load_bf16), producing
-          invalid IR. Explicit float32 cast also improves precision.
-
-      # 15. FLA chunk_delta_h: cast b_g_last to float32 in second exp()
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_delta_h.py"
-        marker: "b_g_last.to(tl.float32))"
-        marker_absent: true
-        sed_command: "s/b_g_last = exp(b_g_last)/b_g_last = exp(b_g_last.to(tl.float32))/"
-        description: >
-          Cast b_g_last to float32 before the second exp() call in
-          chunk_delta_h. Same type inference issue as patch 14.
-
-      # 16. FLA qwen3_next warmup: restrict to T=(64,)
-      - type: sed
-        file: "vllm/model_executor/models/qwen3_next.py"
-        marker: "NOTE(gfx1151)"
-        marker_absent: true
-        sed_command: >
-          s|        for T in (16, 32, 64):|        # NOTE(gfx1151): On RDNA 3.5 (wave32), the FLA Triton kernels\n        # (recompute_w_u_fwd_kernel, chunk_delta_h, etc.) use\n        # tl.make_block_ptr with BT=64 (chunk_size) and boundary_check\n        # for rows where T < BT. On HIP, the GPU page-faults on the\n        # address computation for the (BT, BK) block even though the\n        # actual load would be masked. T must be >= chunk_size (64) to\n        # avoid out-of-bounds address calculation.\n        for T in (64,):|
-        description: >
-          Restrict FLA GDN warmup to T=64 only. On RDNA 3.5, the FLA Triton
-          kernels page-fault when T < BT (chunk_size=64) because HIP
-          materializes the out-of-bounds address computation for
-          tl.make_block_ptr even though boundary_check would mask the load.
-          This only affects the warmup path -- actual inference always uses
-          T >= chunk_size for prefill and the chunk loop for decode.
-
-      # 17. Rotary embedding: flash_attn import try/except
-      - type: sed
-        file: "vllm/model_executor/layers/rotary_embedding/common.py"
-        marker: "flash_attn may be installed"
-        marker_absent: true
-        sed_command: >
-          /from flash_attn.ops.triton.rotary import apply_rotary/{
-            N;N;s|            from flash_attn.ops.triton.rotary import apply_rotary\n\n            self.apply_rotary_emb_flash_attn = apply_rotary|            try:\n                from flash_attn.ops.triton.rotary import apply_rotary\n                self.apply_rotary_emb_flash_attn = apply_rotary\n            except (ImportError, ModuleNotFoundError):\n                # flash_attn may be installed as pure-Python wheel on ROCm\n                # without the flash_attn_2_cuda native extension\n                pass|
-          }
-        description: >
-          Wrap flash_attn.ops.triton.rotary import in try/except. On ROCm,
-          flash_attn is installed as a pure-Python wheel (Triton-based kernels)
-          without the native flash_attn_2_cuda C extension. The rotary import
-          chain (flash_attn.ops.triton.rotary -> flash_attn._utils ->
-          flash_attn_2_cuda) fails with ImportError. The fallback is vLLM's
-          own rotary implementation which works on all platforms.
+          Five fixes for chunk_delta_h.py on gfx1151: (1) import is_amd,
+          (2) restrict num_stages to [2] on AMD, (3) restrict BV to [32],
+          (4) cast exp() operands to float32 (Triton HIP type inference
+          bug), (5) cast b_g_last to float32 in second exp() call.
+          Replaces 5 broken sed patches — import pattern didn't match
+          (FLA_CHUNK_SIZE missing) and would have caused NameError.
 
       # 18. AITER RMSNorm: Triton dispatch for gfx1x (fused_add variant)
       - type: file_rewrite
@@ -1492,47 +1398,16 @@ packages:
           Applied together with patch 18 by the same Python script in
           build-vllm.sh.
 
-      # 20. FLA chunk_o.py: add is_amd import
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_o.py"
-        marker: "is_amd"
-        marker_absent: true
-        sed_command: "s/from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper$/from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_amd, is_nvidia_hopper/"
+      # 11. FLA chunk_o: AMD autotune restrict
+      - type: patch
+        path: "${VLLM_DIR}/patches/fla-chunk-o-gfx1151.patch"
         description: >
-          Add is_amd to the utils import in chunk_o.py. Required by patches
-          21-23 which restrict autotune parameters on AMD HIP.
-
-      # 21. FLA chunk_o.py: restrict BK autotune on AMD
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_o.py"
-        marker: "32\\] if is_amd else BKV_LIST"
-        marker_absent: true
-        sed_command: "s/for BK in BKV_LIST$/for BK in ([32] if is_amd else BKV_LIST)/"
-        description: >
-          Restrict Triton autotune BK to 32 on AMD HIP. The chunk_fwd_kernel_o
-          kernel page-faults during autotuning on RDNA 3.5 with BK>32 and
-          num_stages>2. Same class of fix as chunk_delta_h patches 13-15.
-
-      # 22. FLA chunk_o.py: restrict BV autotune on AMD
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_o.py"
-        marker: "32\\] if is_amd else BKV_LIST"
-        marker_present: true
-        sed_command: "s/for BV in BKV_LIST$/for BV in ([32] if is_amd else BKV_LIST)/"
-        description: >
-          Restrict Triton autotune BV to 32 on AMD HIP. Same rationale as
-          patch 21 — large tile sizes produce code that causes GPU page faults
-          during autotuning on RDNA 3.5 (wave32).
-
-      # 23. FLA chunk_o.py: restrict num_stages autotune on AMD
-      - type: sed
-        file: "vllm/model_executor/layers/fla/ops/chunk_o.py"
-        marker: "\\[2\\] if is_amd"
-        marker_absent: true
-        sed_command: "s/for num_stages in \\[2, 3, 4\\]/for num_stages in ([2] if is_amd else [2, 3, 4])/"
-        description: >
-          Restrict Triton autotune num_stages to 2 on AMD HIP. Higher pipeline
-          stages produce code that page-faults on RDNA 3.5 during autotuning.
+          Four fixes for chunk_o.py on gfx1151: (1) import is_amd,
+          (2) restrict BK to [32], (3) restrict BV to [32],
+          (4) restrict num_stages to [2]. Same page-fault issues as
+          chunk_delta_h. Replaces 4 broken sed patches — import
+          pattern had FLA_GDN_FIX_BT which was renamed to
+          FLA_CHUNK_SIZE in v0.24.0.
 
       # 24. config/vllm.py: re-run hybrid alignment after platform config
       - type: file_rewrite
@@ -1619,17 +1494,9 @@ packages:
           specific scope of the selection function. Context-aware sed prevents
           unintended activation of unstable FlashAttention/ViT paths.
 
-      # 30. Unlock CPU weight offloading in V1 engine (Strix Halo UMA fix)
-      - type: sed
-        file: "vllm/v1/worker/gpu_model_runner.py"
-        marker: "if False: pass # Patched for Offloading"
-        marker_absent: true
-        # Replace the first line of the assert block (12 spaces), delete the rest of the block up to ')'
-        sed_command: '/assert self.offload_config.uva.cpu_offload_gb == 0, (/,/)/{ /assert/s/.*/            if False: pass # Patched for Offloading/; /assert/!d }'
-        description: >-
-          Remove the artificial V1 engine restriction that blocks CPU weight
-          offloading. This enables large model support on Strix Halo UMA
-          architecture when using --enforce-eager.
+      # 16. Unlock CPU weight offloading in V1 engine — REMOVED (R.6.8)
+      # The offload assertion (assert self.offload_config.uva.cpu_offload_gb == 0)
+      # doesn't exist in v0.24.0. Upstream removed or refactored the restriction.
 
       # 31. Qwen3VL ViT: import set_default_torch_dtype for FP32 init
       - type: sed
@@ -1704,6 +1571,36 @@ packages:
           threads per EngineCore, reducing idle CPU from ~3% to ~0% and
           saving ~2 W per instance.
 
+      # 37. spinloop.cpp: include x86intrin.h instead of mwaitxintrin.h (BUILD-FIXES #134)
+      - type: patch
+        path: "${VLLM_DIR}/patches/spinloop-x86intrin.patch"
+        description: >
+          Clang 23 (TheRock LLVM) adds an #error guard to mwaitxintrin.h
+          that forbids direct inclusion — requires x86intrin.h umbrella
+          header instead. vLLM's csrc/spinloop.cpp includes mwaitxintrin.h
+          directly for _mm_monitorx/_mm_mwaitx intrinsics. Single-line fix:
+          mwaitxintrin.h → x86intrin.h. No functional change — x86intrin.h
+          includes mwaitxintrin.h internally.
+
+      # 38. Triton chained or→parentheses (BUILD-FIXES #135)
+      - type: patch
+        path: "${VLLM_DIR}/patches/triton-or-chain-fix.patch"
+        description: >
+          Triton main_perf (0ec280cf) rejects chained boolean operators
+          (A or B or C) without parentheses. vLLM v0.24.0's penalties
+          Triton kernel uses a 3-way or chain. Fix: add parentheses
+          (A or B) or C. Single-line change, no functional difference.
+
+      # 39. Triton knobs module guard (BUILD-FIXES #136)
+      - type: patch
+        path: "${VLLM_DIR}/patches/triton-knobs-import-fix.patch"
+        description: >
+          Triton main_perf (0ec280cf) lacks the triton.knobs module that
+          upstream Triton added later. vLLM v0.24.0's jit_monitor.py imports
+          knobs unconditionally for autotuning print and JIT hooks. Wrap both
+          imports in try/except ImportError to gracefully degrade when knobs
+          is unavailable.
+
   # ---------------------------------------------------------------------------
   # Phase F: Attention
   # ---------------------------------------------------------------------------
@@ -1719,6 +1616,9 @@ packages:
     depends_on: [pytorch, triton, vllm]
     compiler: amdclang
     skip_marker: null
+    skip_check:
+      type: import
+      command: "import flash_attn; print(flash_attn.__version__)"
     build_dependencies:
       - einops
       - packaging
@@ -1765,6 +1665,9 @@ packages:
     depends_on: [pytorch, vllm]
     compiler: amdclang
     skip_marker: null
+    skip_check:
+      type: import
+      command: "from aiter._version import __version__; print(__version__)"
     environment:
       PREBUILD_KERNELS: "0"
     # Modules that use CDNA-only ISA and cannot compile on RDNA 3.5 (gfx1151).
@@ -1952,7 +1855,7 @@ packages:
     branch: "master"
     commit: "6f4f53f2b7da54fcdbbecaaa734337c337ad6176"
     src_dir: "llama.cpp"
-    shallow: true
+    shallow: false
     method: cmake
     phase: I
     steps: [33]

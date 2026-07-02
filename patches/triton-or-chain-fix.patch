@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/v1/worker/gpu/sample/penalties.py b/vllm/v1/worker/gpu/sample/penalties.py
+index b2ce2fb81..4ddc9970c 100644
+--- a/vllm/v1/worker/gpu/sample/penalties.py
++++ b/vllm/v1/worker/gpu/sample/penalties.py
+@@ -129,7 +129,7 @@ def _penalties_kernel(
+     use_rep_penalty = rep_penalty != 1.0
+     use_freq_penalty = freq_penalty != 0.0
+     use_pres_penalty = pres_penalty != 0.0
+-    use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
++    use_penalty = (use_rep_penalty or use_freq_penalty) or use_pres_penalty
+     if not use_penalty:
+         # Early return to avoid loading logits.
+         return

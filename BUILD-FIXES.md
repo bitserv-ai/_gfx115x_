@@ -1999,6 +1999,12 @@ super-project layer.
 (2) Gate the shared-library probe on `if(BUILD_SHARED_LIBS AND ROCTX)`.
 (3) Define `DISABLE_ROCTX` compile definition when `NOT ROCTX`.
 
+**Patch**: `patches/rocblas-roctx-gating.patch` (YAML #11+12, migrated from
+sed to .patch). The original sed append command (`a \\\n  if(NOT ROCTX)...`)
+inserted literal `\n` characters instead of real newlines, causing a CMake
+parse error (`Expected a command name, got unquoted argument with text "\n"`)
+at `library/CMakeLists.txt:85`.
+
 ### 111. rocSPARSE BUILD_WITH_ROCTX not passed by TheRock
 
 **File:** `math-libs/BLAS/CMakeLists.txt`
@@ -2130,6 +2136,353 @@ rocdecode/rocjpeg only depend on `base`, `core`, and `third-party/sysdeps`
 **Follow-up patch**: `patches/therock-media-libs-before-profiler.patch`
 (YAML #20)
 
+### 116. rccl missing `<iostream>`/`<map>`/`<string>` for `std::cerr`/`std::map`/`std::string`
+
+**File:** `rocm-systems/projects/rccl/src/ipc_init.cu`, `rocm-systems/projects/rccl/src/transport/net.cc` (TheRock submodule)
+
+**Symptom**: rccl build fails after ~4 hours (35165/35312 targets):
+```
+ipc_init.cu.cpp:65:3: error: no member named 'cerr' in namespace 'std'
+net_tmp.cc:245:8: error: no member named 'map' in namespace 'std'
+```
+
+**Root cause**: `ipc_init.cu` defines a `HIP_CALL` macro (line 25) that
+uses `std::cerr` for error reporting, but does not include `<iostream>`.
+`net.cc` (hipified to `net_tmp.cc`) uses `std::map` and `std::string`
+without including `<map>` or `<string>`. Older compilers provided these
+transitively through other headers (e.g. `<cuda_runtime.h>`). Modern
+compilers (GCC 15+, Clang 21+) removed these transitive includes,
+exposing the missing direct includes.
+
+**Fix (source-level)**: Add `#include <iostream>` to `ipc_init.cu` (after
+`#include <cuda_runtime.h>`) and `#include <map>` + `#include <string>`
+to `net.cc` (after `#include <mutex>`). Source-level includes are
+incremental-safe — only the affected translation units recompile (~2
+targets), not the entire rccl project.
+
+**Previous approach (abandoned)**: `target_compile_options(rccl PRIVATE
+-include iostream -include map -include string)` in `src/CMakeLists.txt`.
+CMake de-duplicates multiple `-include` flags with the same flag name into
+a single `-include iostream map string`, which clang interprets as
+`-include iostream` plus input files `map` and `string` → build failure.
+Using `SHELL:` prefix or separate `target_compile_options` calls avoids
+the de-duplication, but any CMakeLists.txt flag change triggers a full
+rccl rebuild (34834 targets, ~4h). Source-level `#include` avoids both
+issues.
+
+**Patch**: `patches/rccl-iostream-include.patch` (YAML #21)
+
+### 117. TheRock kpack split_artifacts.py missing `zstandard` Python module
+
+**File:** `rocm-systems/shared/kpack/python/rocm_kpack/ccob_parser.py` (TheRock submodule)
+
+**Symptom**: After rocRAND build succeeds, artifact splitting fails (6 targets):
+```
+ModuleNotFoundError: No module named 'zstandard'
+```
+Affects `rand_run`, `rand_dbg`, `rand_dev`, `rand_test`, `rand_lib`, `rand_doc`
+artifact manifests.
+
+**Root cause**: TheRock v7.15 enables `KPACK_SPLIT_ARTIFACTS=ON` by default
+(`FLAGS.cmake`). The `split_artifacts.py` tool imports `rocm_kpack.ccob_parser`
+which requires `zstandard`. CMake invokes the tool with `/usr/bin/python3`
+(System Python), not the venv. The `configure_therock()` function in
+`build-vllm.sh` installs `pyyaml mako packaging CppHeaderParser` into system
+python but omits `zstandard`. TheRock's own `requirements.txt` declares
+`zstandard>=0.19.0`, but the build script does not install from that file.
+
+**Fix**: Add `zstandard` to the `pip install --break-system-packages` line in
+`configure_therock()` (build-vllm.sh). Also add `zstandard` to
+`build_dependencies` in `vllm-packages.yaml` for venv consistency.
+
+### 118. rocprofiler-sdk configure: CMake User Package Registry shadows dist/ packages
+
+**File:** `cmake/therock_subproject_dep_provider.cmake` (TheRock main repo)
+
+**Symptom**: rocprofiler-sdk configure fails:
+```
+CMake Error at .../build/media-libs/rocdecode/build/rocdecode-config.cmake:28:
+  File or directory .../build/include referenced by rocdecode_INCLUDE_DIR does not exist!
+```
+Occurs even with Patches #19/#20 applied (rocdecode in RUNTIME_DEPS,
+media-libs before profiler) and CMake Package Registry manually cleared.
+
+**Root cause**: TheRock's dependency provider
+(`therock_subproject_dep_provider.cmake:121`) rewrites `find_package()` calls
+to `find_package(<pkg> BYPASS_PROVIDER NO_DEFAULT_PATH PATHS <dist-path>)`.
+However, `NO_DEFAULT_PATH` does **not** exclude the CMake User Package Registry
+(`~/.cmake/packages/`). Subprojects like rocdecode call `export(PACKAGE
+rocdecode)` during configure, which registers their `build/` directory in the
+registry. When a later subproject (rocprofiler-sdk) calls
+`find_package(rocdecode)`, CMake finds the `build/rocdecode-config.cmake` via
+the registry instead of the `dist/` version from `PATHS`. The `build/`
+version resolves `PACKAGE_PREFIX_DIR` to `build/../../../` (wrong path),
+causing `FATAL_ERROR` on missing include directories. The registry is
+recreated on every configure, so manual deletion is not a persistent fix.
+
+**Fix**: Add `NO_CMAKE_PACKAGE_REGISTRY` to the rewritten `find_package`
+signature in `therock_subproject_dep_provider.cmake:121`. This forces CMake
+to ignore the User Package Registry and use only the explicit `PATHS` from
+the dep-provider.
+
+**Patch**: `patches/therock-dep-provider-no-registry.patch` (YAML #22)
+
+### 119. MIOpen ciso646 #warning with GCC 15 + C++20
+
+**File:** `rocm-libraries/projects/miopen/cmake/EnableCompilerWarnings.cmake`
+
+**Symptom**: MIOpen build fails on every source file:
+```
+ciso646:49:6: error: "<ciso646> is not a standard header since C++20,
+  use <version> to detect implementation-specific macros" [-Werror,-W#warnings]
+```
+
+**Root cause**: MIOpen's `serializable.hpp:30` includes `<ciso646>`.
+GCC 15.2.1's `<ciso646>` header emits a `#warning` noting that the header
+is deprecated since C++20. MIOpen compiles with `-std=c++20 -Werror`
+(set in `EnableCompilerWarnings.cmake`), turning the warning into a hard
+error. Clang 23 picks up GCC 15's system include directory, inheriting
+the `#warning`.
+
+**Fix**: Add `"-Wno-#warnings"` (quoted) to the Clang-specific compile options in
+`EnableCompilerWarnings.cmake`. This suppresses `#warning` directives
+without affecting other warning categories. The quotes are required
+because CMake interprets `#` as a comment character in unquoted list
+items, so `-Wno-#warnings` (unquoted) becomes `-Wno-` in the generated
+build.ninja, which is a no-op.
+
+**Patch**: `patches/miopen-ciso646-warnings.patch` (YAML #14)
+
+### 120. TheRock overbuilds: rccl for 23 architectures, unnecessary components enabled
+
+**File:** `build-vllm.sh` (`configure_therock()`, line 1443)
+
+**Symptom**: rccl build takes ~4 hours for 34834 targets across 23 GPU
+architectures (gfx900–gfx1250), of which only ~2200 targets are for
+gfx1151. Additionally, TheRock builds unnecessary components: Debug-Tools
+(rocgdb, rocr-debug-agent, amd-dbgapi), DC-Tools (RDC), Emulation
+(rocjitsu), hipDNN Integration Tests, hipDNN Samples, Core Runtime Tests.
+
+**Root cause**: `THEROCK_TEST_AMDGPU_TARGETS` was never set in
+`configure_therock()`. rccl uses `USE_TEST_AMDGPU_TARGETS` in
+`comm-libs/CMakeLists.txt:33`, which defaults to ALL available
+architectures (23) when `THEROCK_TEST_AMDGPU_TARGETS` is not set.
+`THEROCK_ENABLE_ALL=ON` (TheRock default) enables all component groups
+including ones not needed for vLLM inference.
+
+**Fix**: Set `THEROCK_TEST_AMDGPU_TARGETS=gfx1151` in `configure_therock()`
+cmake args. Disable unnecessary components:
+- `THEROCK_ENABLE_DEBUG_TOOLS=OFF`
+- `THEROCK_ENABLE_DC_TOOLS=OFF`
+- `THEROCK_ENABLE_EMULATION=OFF`
+- `THEROCK_ENABLE_HIPDNN_INTEGRATION_TESTS=OFF`
+- `THEROCK_ENABLE_HIPDNN_SAMPLES=OFF`
+- `THEROCK_ENABLE_CORE_RUNTIME_TESTS=OFF`
+
+**Impact**: rccl: 34834 → ~2200 targets (~4h → ~20min). Total TheRock
+build time reduced by several hours. No functionality lost for vLLM
+inference.
+
+**Note**: gfx1150 (Strix Point) support tracked as TODO R.4.
+
+### 121. `configure_therock()` never called — ninja fails with "No such file or directory"
+
+**File:** `build-vllm.sh` (`build_therock()`, line 1490)
+
+**Symptom**: After deleting `build/` for a clean rebuild, `ninja -j16 -C build`
+fails immediately:
+```
+ninja: fatal: chdir to 'build' - No such file or directory
+```
+
+**Root cause**: `configure_therock()` (line 1389) was defined but never
+called from `build_therock()`. The function generates `build/build.ninja`
+via `cmake -B build -GNinja .`. Without it, `build/` is never created.
+Previously this worked because `build/` persisted from prior runs — the
+skip check `[[ -f "build/build.ninja" ]]` inside `configure_therock()`
+short-circuited, and `build_therock()` called `ninja -C build` directly.
+Deleting `build/` exposed the missing call.
+
+**Fix**: Call `configure_therock` from `build_therock()` before patching
+and building. Added `cd "${THEROCK_SRC}"` after the call because
+`configure_therock()` returns to `${VLLM_DIR}` — without the `cd`,
+`ninja -C build` would look in `${VLLM_DIR}/build` instead of
+`${THEROCK_SRC}/build`.
+
+### 122. CC/CXX not unset in `configure_therock()` — nested sub-builds pick up amdclang
+
+**File:** `build-vllm.sh` (`configure_therock()`, line 1434)
+
+**Symptom**: Potential ABI/flag mismatches in TheRock build artifacts.
+No hard failure — the issue is silent and manifests as subtle runtime
+instability or link errors in downstream components (LLVM runtimes,
+hip-clr).
+
+**Root cause**: `configure_therock()` unsets `CFLAGS`, `CXXFLAGS`,
+`LDFLAGS`, and CMake-specific flag variables, but leaves `CC=amdclang`
+and `CXX=amdclang++` from `vllm-env.sh` in the environment. TheRock uses
+`-DCMAKE_C_COMPILER=gcc` / `-DCMAKE_CXX_COMPILER=g++` for the super-project,
+but nested CMake sub-builds (LLVM runtimes, hip-clr, amd-mesa) can inherit
+`CC`/`CXX` from the environment and use amdclang instead of gcc.
+
+**Fix**: Add `CC CXX` to the `unset` command in `configure_therock()`.
+`_vllm_source_env` at the end of the function restores them.
+
+### 123. rccl-iostream-include.patch fails — CRLF line endings in ipc_init.cu
+
+**File:** `patches/rccl-iostream-include.patch`
+
+**Symptom**: `git apply --check` fails with "fehlerhafter Patch bei Zeile 23".
+`patch --dry-run` reports "different line endings" for `ipc_init.cu`.
+
+**Root cause**: `ipc_init.cu` has CRLF (Windows) line endings (`\r\n`),
+but the hand-written patch used LF-only context lines. `git apply` requires
+context lines to match the target file's line endings exactly. Additionally,
+the hand-written patch lacked `index` lines (blob hashes) that `git apply`
+uses for validation.
+
+**Fix**: Regenerate the patch with `git diff --src-prefix=a/rocm-systems/
+--dst-prefix=b/rocm-systems/` from the `rocm-systems` submodule. This
+produces correct CRLF context lines for `ipc_init.cu` and includes `index`
+lines with blob hashes. Prepend the copyright header comment.
+
+### 124. hip-clr configure fails — CppHeaderParser missing in pre-existing venv
+
+**File:** `build-vllm.sh` (`configure_therock()`, line 1422)
+
+**Symptom**: hip-clr configure fails immediately:
+```
+ModuleNotFoundError: No module named 'CppHeaderParser'
+CMake Error at hipamd/src/CMakeLists.txt:261 (message):
+  The "CppHeaderParser" Python3 package is not installed.
+```
+
+**Root cause**: `configure_therock()` installs Python build dependencies
+(`CppHeaderParser`, `mako`, `zstandard`, etc.) into `$(command -v python3)`
+(system python). However, hip-clr's CMake `find_package(Python3)` resolves
+via PATH, not via the super-project's `-DPython3_EXECUTABLE`. When a
+pre-existing `.venv` from a prior build run is on PATH, hip-clr finds the
+venv python instead of the system python. The venv does not have
+`CppHeaderParser` installed, causing the configure failure.
+
+**Fix**: In `configure_therock()`, after installing deps into system python,
+also check if `.venv/bin/python3` exists and install `CppHeaderParser`
+there (using `ensurepip` if pip is missing from the venv).
+
+### 125. AOCL-LibM SCons fails — amdclang not on PATH (gitversion.py basename strip)
+
+**File:** `build-vllm.sh` (`build_aocl_libm()`, line 1205)
+
+**Symptom**: SCons exits with code 127 during configuration:
+```
+Running cmd: amdclang --version
+Error: Proc failed with retcode:
+127
+Error:/bin/sh: amdclang: Kommando nicht gefunden
+```
+
+**Root cause**: AOCL-LibM's `scripts/site_scons/site_tools/gitversion.py:152`
+strips the directory from `CC` via `ntpath.basename(cc)` and then passes the
+bare compiler name to `GetAOCCVersion()`, which runs `amdclang --version`
+via `subprocess.Popen`. The bare name `amdclang` is not on PATH, so `/bin/sh`
+returns 127. `RunCommand` treats this as fatal (`Error_Exit`).
+
+**Fix**: Export TheRock's llvm/bin to PATH before the `scons` invocation in
+`build_aocl_libm()`:
+```bash
+export PATH="${amdclang%/*}:${PATH}"
+```
+
+### 126. PyTorch hipify fails — third_party submodules not initialized
+
+**File:** `build-vllm.sh` (`build_pytorch()`, line 1650)
+
+**Symptom**: `build_amd.py` crashes during hipify:
+```
+FileNotFoundError: [Errno 2] No such file or directory:
+  'third_party/mslk/include/mslk/utils/tuning_cache.cuh'
+```
+
+**Root cause**: PyTorch's YAML entry does not set `recursive: true`, so
+`clone_pkg()` never initializes submodules. The hipify step
+(`tools/amd_build/build_amd.py`) runs BEFORE `setup.py` and scans files in
+`third_party/` submodules (`mslk`, `cutlass`, `fbgemm`, etc.). After a branch
+switch (`develop` → `release/2.11`), new submodules like `mslk` were added
+but never checked out — all 35 submodules are uninitialized.
+
+**Fix**: Add `git submodule sync` + `git submodule update --init --recursive`
+in `build_pytorch()` before the hipify step. This handles both fresh clones
+and existing clones that switched branches with new submodules.
+
+### 127. PyTorch kineto build fails — ROCTRACER_INCLUDE_DIR hardcoded to /opt/rocm
+
+**File:** `vllm-env.sh` (line 181), `build-vllm.sh` (`build_pytorch()`, line 1695)
+
+**Symptom**: kineto compilation fails:
+```
+RoctracerLogger.h:22:10: fatal error: 'roctracer.h' file not found
+```
+
+**Root cause**: PyTorch's `Dependencies.cmake:1665-1666` sets
+`ROCM_SOURCE_DIR` to `/opt/rocm` if the env var is not set. Kineto's
+`CMakeLists.txt:158` derives `ROCTRACER_INCLUDE_DIR` from it:
+`"${ROCM_SOURCE_DIR}/include/roctracer"`. Since TheRock installs to
+`${LOCAL_PREFIX}` (not `/opt/rocm`), the compiler gets
+`-I/opt/rocm/include/roctracer` (non-existent) instead of
+`-I${LOCAL_PREFIX}/include/roctracer` where the headers actually are.
+
+Additionally, if `build/CMakeCache.txt` exists from a prior configure
+without `ROCM_SOURCE_DIR` exported, CMake skips reconfiguration and
+the stale `-I/opt/rocm/include/roctracer` persists in ninja files.
+
+**Fix**: Two-part:
+1. Export `ROCM_SOURCE_DIR="${ROCM_PATH}"` in `vllm-env.sh` (both
+   TheRock and legacy tarball paths) so the env var is always set.
+2. In `build_pytorch()`: export `ROCM_SOURCE_DIR` explicitly and check
+   `build/build.ninja` for `/opt/rocm/include/roctracer`. If found, delete
+   `build/CMakeCache.txt` to force CMake reconfigure with the correct
+   path (ninja preserves already-built    .o files for incremental build).
+
+### 128. PyTorch validation fails — undefined symbol __kmpc_fork_call (libomp missing)
+
+**File:** `build-vllm.sh` (`build_pytorch()`, wheel patching step, line 1768)
+
+**Symptom**: `import torch` fails:
+```
+libtorch_cpu.so: undefined symbol: __kmpc_fork_call
+```
+
+**Root cause**: PyTorch's CMake links `libtorch_cpu.so` against `libgomp.so.1`
+(GNU OpenMP), despite the YAML setting `OpenMP_CXX_LIB_NAMES=omp` and
+`OpenMP_omp_LIBRARY=${ROCM_PATH}/lib/llvm/lib/libomp.so`. The CMake
+`FindOpenMP` module finds the system libgomp first. Code compiled with
+amdclang uses LLVM OpenMP symbols (`__kmpc_fork_call`, etc.) that
+`libgomp.so.1` does not export. Only `libomp.so` (LLVM) has them.
+
+**Fix**: In the wheel patching step, copy `libomp.so` from TheRock into
+`torch/lib/`, add it as a NEEDED dependency on `libtorch_cpu.so`, and
+ensure `$ORIGIN` is in RPATH so it resolves from the wheel's own
+   `torch/lib/` directory.
+
+### 129. TorchVision build fails — pkg_resources missing (setuptools 81+ removed it)
+
+**File:** `vllm-packages.yaml` (`packages.torchvision.build_dependencies`)
+
+**Symptom**: TorchVision metadata generation fails:
+```
+ModuleNotFoundError: No module named 'pkg_resources'
+```
+
+**Root cause**: `setuptools` 81.0+ removed `pkg_resources` (deprecated since
+setuptools 67). TorchVision v0.24.1's `setup.py` line 14 does
+`import pkg_resources`. The build venv has setuptools 82.0.1 installed.
+
+**Fix**: Two-part:
+1. Add `setuptools<81` to torchvision's `build_dependencies` in
+   `vllm-packages.yaml`.
+2. Add `install_pkg_deps torchvision` to `build_torchvision()` in
+   `build-vllm.sh` (was missing — only `setup_build_env` was called).
+
 ## Runtime Environment Files (Phase I)
 
 The build generates `.env` files for llama.cpp backends used by Lemonade.
@@ -2160,3 +2513,480 @@ Enable per-model during benchmarks.
 | `LLAMA_ARG_UBATCH` | `2048` | Micro-batch size matching batch size |
 
 No HSA/ROCm variables needed — Vulkan uses its own driver stack.
+
+### 130. AOTriton build fails — third_party/triton submodule not initialized
+
+**File:** `build-vllm.sh` (`build_aotriton()`, line 2057)
+
+**Symptom**: AOTriton ninja build fails on first target:
+```
+ERROR: Directory '.' is not installable. Neither 'setup.py' nor 'pyproject.toml' found.
+FAILED: venv/lib/python3.13/site-packages/triton/_C/libtriton.so
+```
+
+**Root cause**: AOTriton's YAML entry does not set `recursive: true`, so
+`clone_pkg()` never initializes the `third_party/triton` submodule. The
+build's first ninja target does `pip install .` in that submodule directory,
+which is empty.
+
+**Fix**: Two-part:
+1. Add `git submodule sync --quiet` + `git submodule update --init
+   --recursive` in `build_aotriton()` before the build, same pattern as
+   BUILD-FIXES #126 (PyTorch).
+2. Patch `third_party/triton/setup.py` to build AMD-only backend
+   (`["nvidia", "amd"]` → `["amd"]`). The NVIDIA backend builds CUDA
+   targets (gsan.ll for sm_80) requiring CUDA+GCC, not available on a
+   ROCm-only system. **SUPERSEDED by #132** — Triton core depends on
+   the NVWS dialect from `third_party/nvidia/`, so both backends must be
+   loaded. See #132 for the current backend configuration and GSan
+   disable.
+
+### 131. SUPERSEDED — examples/plugins NVIDIA backend dep (folded into #132)
+
+**Status**: Superseded by #132. With `TRITON_CODEGEN_BACKENDS=amd;nvidia`
+(both backends loaded), `examples/plugins` builds normally —
+`TritonNVIDIAGPUConversionPassIncGen` and `TritonNvidiaGPUTableGen` targets
+exist. The `add_subdirectory(examples/plugins)` skip-patch was removed.
+
+`TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"` is retained (still
+useful — skips googletest download + compile for wheel builds).
+
+### 132. Triton core depends on NVWS dialect from third_party/nvidia — AMD-only backend breaks core compilation
+
+**File:** `build-vllm.sh` (`build_aotriton()`, line 2060)
+
+**Symptom**: After #130's original AMD-only patch
+(`TRITON_CODEGEN_BACKENDS=amd`), Triton's `pip install .` fails during
+C++ compilation of `TritonGPUTransforms`:
+```
+fatal error: 'nvidia/include/Dialect/NVWS/IR/Dialect.h.inc' file not found
+FAILED: lib/Dialect/TritonGPU/Transforms/CMakeFiles/TritonGPUTransforms.dir/AccelerateMatmul.cpp.o
+```
+12+ source files in `lib/Dialect/TritonGPU/Transforms/` fail with the
+same error.
+
+**Root cause**: Triton `main_perf` @ `0ec280cf` integrated the NVWS
+(NVIDIA Warp Specialization) dialect into core code:
+- `include/triton/Dialect/TritonGPU/Transforms/Passes.h:5` includes
+  `nvidia/include/Dialect/NVWS/IR/Dialect.h`
+- `lib/Dialect/TritonGPU/Transforms/CMakeLists.txt` links `NVWSIR` and
+  `NVWSTransforms`
+- `lib/Dialect/TritonGPU/Transforms/WarpSpecialization/PartitionLoops.cpp`
+  uses `nvws::WarpGroupOp` (4 call sites)
+
+The NVWS dialect's TableGen `.h.inc` files are only generated when
+`third_party/nvidia` is loaded via `add_subdirectory`. With AMD-only
+backends, these targets don't exist → core compilation fails.
+
+**Fix**: Four-part:
+1. Load both backends: patch `setup.py` to `["amd", "nvidia"]` (AMD
+   first for codegen priority). This generates all NVWS TableGen files
+   and builds `NVWSIR`/`NVWSTransforms` targets.
+2. Disable GSan runtime in `third_party/nvidia/CMakeLists.txt`
+   (`add_custom_target(TritonNVIDIAGSanRuntime ALL)` and
+   `add_dependencies(TritonNVIDIA TritonNVIDIAGSanRuntime)` commented
+   out). The GSan build compiles a CUDA kernel (`--cuda-gpu-arch=sm_80`)
+   needing CUDA+GCC, not available on ROCm. All other NVIDIA backend
+   targets (NVWS dialect, NVGPUToLLVM, TritonNVIDIAGPUToLLVM, hopper)
+   are pure C++/MLIR and build without CUDA.
+3. Set `TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"` (from #131,
+   retained). Skips unittest/ (googletest download + compile).
+4. Restore Triton source files to pristine state before patching:
+   `git checkout -- setup.py CMakeLists.txt` (in `third_party/triton`)
+   and `git checkout -- CMakeLists.txt` (in
+   `third_party/triton/third_party/nvidia`). Previous build runs leave
+   sed-patches on these files — without restoration, the `grep -q`
+   idempotency guards fail (pattern not found because file is already
+   patched), and GSan gets double/triple-commented on each retry.
+
+**Supersedes**: #130 Teil 2 (AMD-only → AMD+NVIDIA with GSan disabled),
+#131 (examples/plugins skip → no longer needed with both backends).
+
+**Trade-off**: The `TritonNVIDIA` pybind11 plugin
+(`triton_nvidia.cc`) is built but unused on ROCm. It links
+`TritonNVIDIAGPUToLLVM` + `NVGPUToLLVM` (C++ only, no CUDA). Minor
+compile-time cost, no runtime impact — the plugin is not loaded by
+AMD codegen paths.
+
+### 133. vLLM v0.24.0 patch refactor (R.6)
+
+**Symptom**: 15 of 27 sed-based vLLM patches fail silently or crash
+at runtime after the version-pin upgrade to v0.24.0. Two pre-existing
+git patches (`fp8-e5m2-quant-utils`, `skip-distributed-single-gpu`)
+fail `git apply --check` with context mismatch.
+
+**Root cause**: Three distinct failure modes:
+
+**Part 1 — Substring/variable-name bugs (9 sed patches → 5 git patches)**:
+
+The sed commands were written for vLLM v0.22/v0.23 and assumed specific
+code patterns that no longer exist or were never correct:
+
+- **AITER gate** (sed → `aiter-gate-gfx1x.patch`): sed
+  `s/on_gfx9/.../` matched `on_gfx950` as substring, producing
+  `on_gfx1x50` (function doesn't exist). Target `return on_gfx9()`
+  didn't match — v0.24.0 uses `return on_mi3xx()`.
+
+- **AITER FA gate** (2 sed → `aiter-fa-gfx1x-gate.patch`): Marker
+  `import on_gfx1x` didn't match `import on_mi3xx, on_gfx1x` → sed ran
+  on every build attempt → triple-import `on_gfx1x, on_gfx1x, on_gfx1x`.
+
+- **AITER fusion skip_duplicates** (sed → `aiter-fusion-skip-duplicates.patch`):
+  sed range `/register_replacement(/,/)/` terminated at the first `)`
+  inside `self.empty(5, 16)` — only 3 of 8 calls were patched. The
+  remaining 5 calls still raised "Duplicate pattern" RuntimeError.
+
+- **FLA chunk_delta_h** (5 sed → `fla-chunk-delta-h-gfx1151.patch`):
+  Import pattern `from .utils import use_cuda_graph` didn't match
+  `from .utils import FLA_CHUNK_SIZE, use_cuda_graph` → `is_amd` never
+  imported → NameError at runtime when autotune configs reference it.
+
+- **FLA chunk_o** (4 sed → `fla-chunk-o-gfx1151.patch`): Import pattern
+  referenced `FLA_GDN_FIX_BT` which was renamed to `FLA_CHUNK_SIZE` in
+  v0.24.0 → same NameError as chunk_delta_h.
+
+**Part 2 — Upstream already fixed (6 sed patches removed)**:
+
+v0.24.0 incorporated or refactored the target code:
+- ViT FA revert: upstream already gates on `on_gfx9()` only.
+- `is_eager_execution` guard: variable removed, code refactored.
+- FLA GDN warmup `for T in (16, 32, 64)`: loop removed from qwen3_next.py.
+- `flash_attn` try/except: upstream uses `suppress(ModuleNotFoundError)`.
+- CPU offload assertion: removed from gpu_model_runner.py.
+- AITER gate `return on_gfx9()`: function uses `return on_mi3xx()`.
+
+**Part 3 — Git patch context mismatch (2 patches regenerated)**:
+
+- `fp8-e5m2-quant-utils.patch`: v0.24.0 renamed `TORCH_CHECK` →
+  `STD_TORCH_CHECK`, `at::ScalarType` → `torch::headeronly::ScalarType`,
+  and changed KV cache dispatch from string comparison
+  (`KV_DTYPE == "fp8_e5m2"`) to enum
+  (`KV_CACHE_DTYPE == vllm::Fp8KVCacheDataType::kFp8E5M2`).
+
+- `skip-distributed-single-gpu.patch`: v0.24.0 added a blank line
+  before `global _WORLD` declaration (Hunk 4), removed `global _EPLB`
+  from a different scope (Hunk 13), changed `gpu_worker.py` import
+  block to include `ensure_ec_transfer_shutdown` and
+  `override_envs_for_eplb` signature (Hunks 1-2).
+
+**Fix**: Consolidated 36 patch entries to 21:
+- 15 broken/no-op sed patches removed.
+- 5 new git patches created from clean HEAD with `git apply --check` +
+  `git apply --reverse --check` validation.
+- 2 pre-existing git patches regenerated against v0.24.0.
+- `clean_generated: true` added to vLLM package in YAML — ensures
+  `git checkout -- .` runs before `git checkout <commit>` to discard
+  dirty working tree from failed `git apply --reject` runs.
+
+**Patch inventory** (before → after):
+
+| Category | Before | After |
+|----------|--------|-------|
+| prepend | 1 | 1 |
+| sed | 22 | 3 |
+| file_rewrite | 7 | 7 |
+| git patch | 9 | 14 |
+| **Total** | **36** | **21** |
+| Broken/no-op | 15 | 0 |
+
+### 134. spinloop.cpp mwaitxintrin.h direct inclusion rejected by Clang 23
+
+**Symptom**: vLLM C++ build fails compiling `csrc/spinloop.cpp`:
+
+```
+FAILED: CMakeFiles/spinloop.dir/csrc/spinloop.cpp.o
+/opt/src/vllm/local/lib/llvm/lib/clang/23/include/mwaitxintrin.h:11:2:
+  error: "Never use <mwaitxintrin.h> directly; include <x86intrin.h> instead."
+```
+
+**Root cause**: TheRock ships LLVM/Clang 23, which added an `#error`
+guard to `mwaitxintrin.h` forbidding direct inclusion. vLLM's
+`csrc/spinloop.cpp:10` includes `<mwaitxintrin.h>` directly to access
+`_mm_monitorx` and `_mm_mwaitx` intrinsics for AMD MonitorX/MWAITX
+spinloop optimization.
+
+**Fix**: Replace `#include <mwaitxintrin.h>` with
+`#include <x86intrin.h>` — the x86 umbrella header that transitively
+includes `mwaitxintrin.h`. No functional change; all intrinsics
+(`_mm_monitorx`, `_mm_mwaitx`, `__get_cpuid`, `__builtin_ia32_pause`)
+remain available via `x86intrin.h`.
+
+Single-line patch: `spinloop-x86intrin.patch`.
+
+### 135. Triton rejects chained `or` without parentheses
+
+**Symptom**: vLLM smoke test fails at import time with a Triton
+compilation error in `vllm/v1/worker/gpu/sample/penalties.py:132`:
+
+```
+triton.compiler.errors.CompilationError: ...
+  use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
+```
+
+**Root cause**: Triton `main_perf` @ `0ec280cf` parses chained boolean
+`or` expressions left-to-right but raises a parse error on the third
+operand when parentheses are absent — `A or B or C` is rejected,
+`(A or B) or C` is accepted. This is a parser limitation in the
+`main_perf` branch; upstream Triton `main` does not exhibit it.
+
+vLLM v0.24.0's `penalties.py` Triton kernel (`_penalties_kernel`)
+uses a 3-way `or` chain to determine whether any penalty is active:
+
+```python
+use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
+```
+
+**Fix**: Add explicit parentheses to make the grouping unambiguous:
+
+```python
+use_penalty = (use_rep_penalty or use_freq_penalty) or use_pres_penalty
+```
+
+No functional change — Python's `or` is already left-associative.
+Patch: `triton-or-chain-fix.patch`.
+
+### 136. Triton `knobs` module does not exist in main_perf
+
+**Symptom**: vLLM smoke test fails at startup with:
+
+```
+ImportError: cannot import name 'knobs' from 'triton'
+  File ".../vllm/triton_utils/jit_monitor.py", line 75
+    from triton import knobs
+```
+
+**Root cause**: The `triton.knobs` submodule was introduced in Triton
+`main` after the `0ec280cf` commit that `main_perf` is pinned at.
+vLLM v0.24.0's `jit_monitor.py` imports `knobs` unconditionally in two
+functions:
+
+1. `_setup_triton_autotuning_print()` (L75) — uses
+   `knobs.runtime.set_default_autotuning_print`
+2. `_setup_triton_jit_hook()` (L121) — uses
+   `knobs.runtime.jit_post_compile_hook`
+
+Both functions are called during vLLM startup. When `knobs` is absent,
+the `ImportError` propagates and crashes the engine.
+
+**Fix**: Wrap both `from triton import knobs` statements in
+`try/except ImportError` with an early `return`. The autotuning-print
+and JIT-hook features are optional diagnostics — silently degrading
+when `knobs` is unavailable is safe.
+
+Patch: `triton-knobs-import-fix.patch`.
+
+### 137. EngineCore fork inherits corrupted HIP state from AITER .so modules
+
+**Symptom**: vLLM smoke test fails when the EngineCore subprocess
+attempts to query GPU memory:
+
+```
+hipErrorInvalidValue: cudaMemGetInfo failed
+```
+
+The error occurs in the child process after `fork()`, not in the
+parent. `torch.cuda.is_initialized()` returns `False` in the parent,
+so vLLM's default `fork` multiprocessing path is selected.
+
+**Root cause**: AITER's compiled `.so` modules (e.g.,
+`module_aiter_enum.so`) contain HIP runtime initialization code in
+their `dlopen` constructors. When Python imports these modules, the
+constructors execute and partially initialize the HIP runtime —
+allocating internal state, opening device handles, and registering
+callback hooks.
+
+`torch.cuda.is_initialized()` only checks PyTorch's own initialization
+flag, not the underlying HIP runtime state. So vLLM sees
+`is_initialized() == False` and chooses `fork`. But `fork()` duplicates
+the parent's entire address space — including the partially-initialized
+HIP runtime state. The child process inherits stale device handles and
+corrupted internal state, causing `cudaMemGetInfo` to return
+`hipErrorInvalidValue`.
+
+**Fix**: Force `spawn` multiprocessing method for EngineCore
+subprocesses by setting:
+
+```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+```
+
+in `vllm-env.sh`. `spawn` creates a fresh Python interpreter that
+re-initializes all C/HIP state from scratch, avoiding the inherited
+corruption. This is a runtime configuration, not a source patch —
+the export is added to `vllm-env.sh` after the MIOpen section.
+
+### 138. llama.cpp ROCm backend missing libomp.so
+
+**Symptom**: llama.cpp ROCm backend binary (`llama-server`) fails to
+start with:
+
+```
+error while loading shared libraries: libomp.so: cannot open shared object file
+```
+
+The Vulkan and CPU backends start correctly.
+
+**Root cause**: `finalize_llamacpp_backend()` accepts a third
+argument `_skip_libomp` which, when set to `"skip"`, suppresses
+copying `libomp.so` to the backend directory. The ROCm call site
+passed `"skip"` as the third argument:
+
+```bash
+finalize_llamacpp_backend "${LLAMACPP_ROCM_DIR}" "rocm" "skip"
+```
+
+The rationale was that ROCm binaries "have their own resolver."
+However, the binaries' RUNPATH is set to `$ORIGIN:${LOCAL_PREFIX}/lib`,
+and `libomp.so` lives at `${LOCAL_PREFIX}/llvm/lib/libomp.so` — not
+in `${LOCAL_PREFIX}/lib`. The dynamic linker cannot find it.
+
+The Vulkan and CPU backends do not pass `"skip"`, so `libomp.so` is
+copied to their directories and resolved via `$ORIGIN`.
+
+**Fix**: Remove the `"skip"` third argument from the ROCm call site
+(build-vllm.sh L4786):
+
+```bash
+finalize_llamacpp_backend "${LLAMACPP_ROCM_DIR}" "rocm"
+```
+
+Now `libomp.so` is copied to the ROCm backend directory and resolved
+via `$ORIGIN`, matching the Vulkan and CPU backends.
+
+### 139. llama.cpp pinned commit not found in shallow clone
+
+**Symptom**: Build fails at the llama.cpp clone step with:
+
+```
+fatal: reference is not a tree: 6f4f53f2b7da54fcdbbecaaa734337c337ad6176
+```
+
+**Root cause**: `vllm-packages.yaml` had `shallow: true` for the
+llamacpp package. The build script's `clone_pkg()` function uses
+`git clone --depth 1` when `shallow: true`, which fetches only the
+latest HEAD of the branch. The pinned commit `6f4f53f2` is an older
+commit on `master` — not the current HEAD — so it is not present
+in the shallow clone's object database.
+
+Other packages with `shallow: true` (e.g., AOCL-Utils) work because
+their pinned commits happen to be the branch HEAD at clone time.
+llama.cpp's `master` branch moves fast, so the pinned commit
+falls behind HEAD between builds.
+
+**Fix**: Set `shallow: false` for llamacpp in `vllm-packages.yaml`.
+This performs a full clone, making any commit on the branch
+fetchable. The clone is one-time and cached by the build script's
+skip-marker logic, so the cost is paid only on first build.
+
+### 140. vLLM v0.24.0 renames pipeline_model_parallel_size to pipeline_parallel_size
+
+**Symptom**: vLLM smoke test fails during distributed initialization
+with:
+
+```
+AttributeError: 'ParallelConfig' object has no attribute 'pipeline_model_parallel_size'
+```
+
+**Root cause**: vLLM v0.24.0 renamed the `ParallelConfig` attribute
+`pipeline_model_parallel_size` → `pipeline_parallel_size` (and
+similarly for the constructor parameter). The
+`skip-distributed-single-gpu.patch` (patch #20, BUILD-FIXES #102)
+references `parallel_config.pipeline_model_parallel_size` in the
+`gpu_worker.py` single-GPU fast path:
+
+```python
+pipeline_model_parallel_size=parallel_config.pipeline_model_parallel_size,
+```
+
+This was correct when the patch was written against v0.23.x, but
+the attribute no longer exists in v0.24.0.
+
+**Fix**: Update `skip-distributed-single-gpu.patch` to use the new
+attribute name:
+
+```python
+pipeline_model_parallel_size=parallel_config.pipeline_parallel_size,
+```
+
+The patch file, source tree, and venv installation were all updated.
+No other references to `pipeline_model_parallel_size` exist in the
+patch.
+
+### 141. Heavy build steps lack skip markers — unnecessary rebuilds on resume
+
+**Symptom**: Re-running `build-vllm.sh --step 19` (e.g., after a
+Python-only patch change) triggers a full C++ wheel rebuild for vLLM
+(Step 24, ~1-2h), AITER (Step 28, ~10 min), and Flash Attention
+(Step 28, ~5 min), followed by a complete AITER JIT pre-warm
+(Step 29, ~20 min) — even when none of these packages changed.
+
+**Root cause**: An audit of all step functions revealed that three
+heavy build functions lacked `should_skip_step` calls:
+
+1. **`build_vllm()`** (Step 24): The YAML `skip_check` was defined
+   (`type: import`, checks `import vllm; torch.cuda.is_available()`)
+   but the function never called `should_skip_step vllm`. The check
+   existed in YAML but was silently ignored — a bug.
+
+2. **`rebuild_aiter()`** (Step 28): No `skip_check` in YAML, no
+   `should_skip_step` call. Always runs, always purges the JIT cache
+   (`find *.so -delete` at L2986), always force-reinstalls the wheel
+   (`uv pip install --force-reinstall`). This triggers a full 20-min
+   JIT recompilation in Step 29 even when AITER source is unchanged.
+
+3. **`build_flash_attention()`** (Step 28): No `skip_check` in YAML,
+   no `should_skip_step` call. Always rebuilds the Python wheel.
+
+**Fix**: Added `should_skip_step` calls to all three functions. Added
+`skip_check` entries to YAML for `aiter` and `flash_attention`:
+
+```yaml
+# aiter
+skip_check:
+  type: import
+  command: "from aiter._version import __version__; print(__version__)"
+
+# flash_attention
+skip_check:
+  type: import
+  command: "import flash_attn; print(flash_attn.__version__)"
+```
+
+For `build_vllm()`, the existing YAML `skip_check` is now actually
+invoked.
+
+Additionally, `warmup_aiter_jit()` (Step 29) now short-circuits when
+the JIT cache is intact — it counts `.so` files in the JIT directory
+and compares against the expected count (67 total modules minus
+CDNA-only skip list). If all expected `.so` files are present, the
+entire pre-warm loop is skipped, avoiding the overhead of importing
+torch+aiter and iterating 67 modules just to print "already built".
+
+### 142. No mechanism to bypass skip markers for targeted rebuilds
+
+**Symptom**: After adding skip markers (#141), there was no way to
+force a specific package to rebuild without either uninstalling it
+from the venv or running `--rebuild` (which wipes everything).
+
+**Root cause**: `should_skip_step()` had no override mechanism. Once
+a package passed its skip check, it was always skipped — even when
+the user explicitly wanted to rebuild it (e.g., after applying new
+patches).
+
+**Fix**: Added `--force-rebuild <pkg1,pkg2>` CLI flag. When
+specified, `should_skip_step()` checks the package key against the
+force-rebuild list and returns 1 (don't skip) for matching packages,
+bypassing the YAML `skip_check` entirely.
+
+Usage:
+
+```bash
+# Rebuild only vLLM (skip AITER, Flash Attention, JIT pre-warm)
+./build-vllm.sh --step 19 --force-rebuild vllm
+
+# Rebuild vLLM and AITER
+./build-vllm.sh --step 19 --force-rebuild vllm,aiter
+```
+
+The flag is parsed in the argument-parsing loop alongside `--rebuild`
+and `--step`, and the value is displayed in `main()`'s startup info.

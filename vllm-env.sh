@@ -178,11 +178,13 @@ _ROCM_VERSION_FILE="${VLLM_DIR}/.rocm-version"
 if [[ -d "${_LOCAL_PREFIX}/lib" ]]; then
     # Source-compiled TheRock (preferred — unified prefix)
     export ROCM_PATH="${_LOCAL_PREFIX}"
+    export ROCM_SOURCE_DIR="${_LOCAL_PREFIX}"
 elif [[ -f "${_ROCM_VERSION_FILE}" ]]; then
     # Legacy: tarball-extracted ROCm
     ROCM_VERSION="$(cat "${_ROCM_VERSION_FILE}")"
     export ROCM_VERSION
     export ROCM_PATH="${VLLM_DIR}/rocm-${ROCM_VERSION}"
+    export ROCM_SOURCE_DIR="${VLLM_DIR}/rocm-${ROCM_VERSION}"
 fi
 
 if [[ -n "${ROCM_PATH:-}" && -d "${ROCM_PATH}" ]]; then
@@ -325,6 +327,17 @@ export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
 # level. MIOpen's exhaustive search is redundant and adds minutes to CUDA graph
 # warmup (51 batch sizes × multiple kernel shapes per size).
 export MIOPEN_FIND_MODE=2
+
+# =============================================================================
+# vLLM Runtime Configuration
+# =============================================================================
+# Force multiprocessing spawn method for EngineCore subprocesses.
+# AITER's .so modules partially initialize the HIP runtime at import time
+# (via dlopen constructors), even though PyTorch's cuda_is_initialized()
+# returns False. When vLLM forks the EngineCore subprocess, the child
+# inherits this corrupted HIP state, causing hipErrorInvalidValue from
+# cudaMemGetInfo. Forcing spawn ensures a clean HIP context per process.
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # =============================================================================
 # Triton Compiler Optimization

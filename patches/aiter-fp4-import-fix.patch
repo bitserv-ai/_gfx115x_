@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/vllm/_aiter_ops.py b/vllm/_aiter_ops.py
-index 0000000..0000000 100644
+index 95a536103..40f2de42e 100644
 --- a/vllm/_aiter_ops.py
 +++ b/vllm/_aiter_ops.py
 @@ -1728,9 +1728,9 @@ class rocm_aiter_ops:

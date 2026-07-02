@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/csrc/spinloop.cpp b/csrc/spinloop.cpp
+index c29e48a5f..3285b9a3d 100644
+--- a/csrc/spinloop.cpp
++++ b/csrc/spinloop.cpp
+@@ -7,7 +7,7 @@ extern "C" {
+ 
+ #if defined(__i386__) || defined(__x86_64__)
+   #include <cpuid.h>
+-  #include <mwaitxintrin.h>
++  #include <x86intrin.h>
+ #endif
+ 
+ #if defined(CLOCK_MONOTONIC_RAW)

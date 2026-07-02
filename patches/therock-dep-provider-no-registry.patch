@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/cmake/therock_subproject_dep_provider.cmake b/cmake/therock_subproject_dep_provider.cmake
+index 875d803fc..80bbc0e51 100644
+--- a/cmake/therock_subproject_dep_provider.cmake
++++ b/cmake/therock_subproject_dep_provider.cmake
+@@ -118,7 +118,7 @@ function(therock_reparse_super_project_find_package superproject_path package_na
+     if(UNUSED_CONFIG)
+       list(APPEND _rewritten "CONFIG")
+     endif()
+-    list(APPEND _rewritten BYPASS_PROVIDER NO_DEFAULT_PATH PATHS ${superproject_path})
++    list(APPEND _rewritten BYPASS_PROVIDER NO_DEFAULT_PATH NO_CMAKE_PACKAGE_REGISTRY PATHS ${superproject_path})
+   endif()
+ 
+   list(JOIN _rewritten " " _rewritten_pretty)

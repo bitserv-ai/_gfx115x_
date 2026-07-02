@@ -1,0 +1,29 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/triton_utils/jit_monitor.py b/vllm/triton_utils/jit_monitor.py
+index 9a7b1695a..71b1dc0bd 100644
+--- a/vllm/triton_utils/jit_monitor.py
++++ b/vllm/triton_utils/jit_monitor.py
+@@ -72,7 +72,10 @@ def _setup_triton_autotuning_print() -> None:
+     """Enable ``TRITON_PRINT_AUTOTUNING`` unless the user opted out."""
+     if not HAS_TRITON:
+         return
+-    from triton import knobs  # type: ignore[import-untyped]
++    try:
++        from triton import knobs  # type: ignore[import-untyped]
++    except ImportError:
++        return
+ 
+     user_val = os.environ.get("TRITON_PRINT_AUTOTUNING")
+     if user_val == "0":
+@@ -115,7 +118,10 @@ def _setup_triton_jit_hook() -> None:
+     """Register a ``jit_post_compile_hook`` that warns on compilation."""
+     if not HAS_TRITON:
+         return
+-    from triton import knobs  # type: ignore[import-untyped]
++    try:
++        from triton import knobs  # type: ignore[import-untyped]
++    except ImportError:
++        return
+ 
+     existing_hook = knobs.runtime.jit_post_compile_hook
+ 

@@ -28,6 +28,7 @@
 #   scripts/build-vllm.sh             # Full build (idempotent)
 #   scripts/build-vllm.sh --rebuild   # Force rebuild (clean + build)
 #   scripts/build-vllm.sh --step N    # Run from step N onward
+#   scripts/build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
 #
 # Build pipeline (35 steps):
 #   Phase A: ROCm SDK (TheRock — builds amdclang used by everything downstream)
@@ -217,6 +218,7 @@ WHEELS_DIR="${VLLM_DIR}/wheels"
 
 REBUILD=false
 START_STEP=1
+FORCE_REBUILD_PKGS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -228,8 +230,12 @@ while [[ $# -gt 0 ]]; do
             START_STEP="$2"
             shift 2
             ;;
+        --force-rebuild)
+            FORCE_REBUILD_PKGS="$2"
+            shift 2
+            ;;
         *)
-            die "Unknown argument: $1. Usage: build-vllm.sh [--rebuild] [--step N]"
+            die "Unknown argument: $1. Usage: build-vllm.sh [--rebuild] [--step N] [--force-rebuild pkg1,pkg2]"
             ;;
     esac
 done
@@ -933,6 +939,17 @@ apply_patches() {
 should_skip_step() {
     local pkg_key="$1"
 
+    # --force-rebuild override: bypass skip check for specified packages
+    if [[ -n "${FORCE_REBUILD_PKGS}" ]]; then
+        local _force_list="${FORCE_REBUILD_PKGS//,/ }"
+        for _pkg in ${_force_list}; do
+            if [[ "${_pkg}" == "${pkg_key}" ]]; then
+                info "${pkg_key} force-rebuild requested (--force-rebuild), skipping skip check"
+                return 1
+            fi
+        done
+    fi
+
     local check_type
     check_type="$(ycfg ".packages.${pkg_key}.skip_check.type")"
     [[ -n "${check_type}" ]] || return 1
@@ -1200,6 +1217,10 @@ build_aocl_libm() {
     source "${AOCL_LIBM_SRC}/.venv/bin/activate"
     pip install scons 2>&1 | tail -1
 
+    # AOCL-LibM's SCons gitversion.py strips the directory from CC and runs
+    # the bare compiler name (ntpath.basename) — amdclang must be on PATH.
+    export PATH="${amdclang%/*}:${PATH}"
+
     scons -j"$(nproc)" \
         ALM_CC="${amdclang}" \
         ALM_CXX="${amdclangxx}" \
@@ -1398,21 +1419,36 @@ configure_therock() {
 
     # TheRock's nested cmake sub-builds (LLVM runtimes, hip-clr, amd-mesa)
     # each run FindPython3 independently and may find a different Python
-    # than the venv. Install required Python packages into whatever python3
-    # cmake would find on the system, in addition to the venv.
+    # than the one we point at via -DPython3_EXECUTABLE. In particular,
+    # hip-clr's find_package(Python3) resolves via PATH and can find a
+    # pre-existing .venv from a prior build run. Install required Python
+    # packages into system python AND the venv (if it exists).
     local sys_python
     sys_python="$(command -v python3)"
     if [[ -n "${sys_python}" ]] && ! "${sys_python}" -c 'import yaml, mako, packaging, CppHeaderParser' 2>/dev/null; then
         info "Installing TheRock Python deps into system python: ${sys_python}"
         "${sys_python}" -m pip install --break-system-packages \
-            pyyaml mako packaging "CppHeaderParser==2.7.4" 2>/dev/null || true
+            pyyaml mako packaging "CppHeaderParser==2.7.4" zstandard 2>/dev/null || true
+    fi
+
+    if [[ -f "${VLLM_DIR}/.venv/bin/python3" ]]; then
+        local venv_python="${VLLM_DIR}/.venv/bin/python3"
+        if ! "${venv_python}" -c 'import CppHeaderParser' 2>/dev/null; then
+            info "Installing TheRock Python deps into existing venv: ${venv_python}"
+            "${venv_python}" -m ensurepip 2>/dev/null || true
+            "${venv_python}" -m pip install \
+                "CppHeaderParser==2.7.4" 2>/dev/null || true
+        fi
     fi
 
     # TheRock requires GCC — rocprofiler-systems has an explicit GNU
     # compiler check that blocks Clang. Unset all amdclang-specific flags;
     # re-source vllm-env.sh afterward to restore them.
+    # CC/CXX must also be unset: nested CMake sub-builds (LLVM runtimes,
+    # hip-clr) can inherit CC/CXX from the environment and pick up amdclang
+    # instead of gcc, causing ABI/flag mismatches (K.1).
     unset CFLAGS CXXFLAGS LDFLAGS CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE \
-          CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS
+          CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CC CXX
 
     # TheRock has deeply nested cmake sub-builds (LLVM -> runtimes) that
     # each run FindPython3 independently. TheRock now runs BEFORE our venv
@@ -1421,16 +1457,31 @@ configure_therock() {
     # Python3_ROOT_DIR is the cmake hint that propagates through sub-builds.
     cmake -B build -GNinja . \
         -DTHEROCK_AMDGPU_FAMILIES=gfx1151 \
+        -DTHEROCK_TEST_AMDGPU_TARGETS=gfx1151 \
         -DCMAKE_C_COMPILER=gcc \
         -DCMAKE_CXX_COMPILER=g++ \
         -DCMAKE_INSTALL_PREFIX="${LOCAL_PREFIX}" \
         -DPython3_EXECUTABLE="${sys_python}" \
         -DTHEROCK_BUILD_TESTING=OFF \
         -DTHEROCK_ENABLE_PROFILER=OFF \
-        -DTHEROCK_FLAG_INCLUDE_PROFILER=OFF
+        -DTHEROCK_FLAG_INCLUDE_PROFILER=OFF \
+        -DTHEROCK_ENABLE_DEBUG_TOOLS=OFF \
+        -DTHEROCK_ENABLE_DC_TOOLS=OFF \
+        -DTHEROCK_ENABLE_EMULATION=OFF \
+        -DTHEROCK_ENABLE_HIPDNN_INTEGRATION_TESTS=OFF \
+        -DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF \
+        -DTHEROCK_ENABLE_CORE_RUNTIME_TESTS=OFF
         # Profiler disabled: rocprofiler-sdk's vendored yaml-cpp and elfio
         # have missing <cstdint> includes under modern compilers (Clang 18+,
         # GCC 15+). Profiling is not needed for vLLM inference.
+        #
+        # TEST_AMDGPU_TARGETS=gfx1151: rccl uses USE_TEST_AMDGPU_TARGETS which
+        # defaults to ALL available architectures (23). Without this flag,
+        # rccl builds 34834 targets (~4h) instead of ~2200 (~20min).
+        #
+        # DEBUG_TOOLS/DC_TOOLS/EMULATION disabled: not needed for vLLM
+        # inference. hipDNN integration tests/samples and core runtime tests
+        # disabled to save build time.
 
     # Restore all flags from vllm-env.sh
     # shellcheck source=vllm-env.sh
@@ -1446,12 +1497,15 @@ build_therock() {
 
     cd "${THEROCK_SRC}"
 
-
     # Check if already built and installed
     if should_skip_step therock; then
         cd "${VLLM_DIR}"
         return
     fi
+
+    # Configure (skips if build/build.ninja already exists)
+    configure_therock
+    cd "${THEROCK_SRC}"
 
     info "Building TheRock with $(nproc) cores..."
     info "This is the longest step. Expected time: 2-4 hours."
@@ -1604,6 +1658,15 @@ build_pytorch() {
     # Install Python build deps from YAML manifest
     install_pkg_deps pytorch
 
+    # Initialize submodules. PyTorch's hipify step (build_amd.py) runs BEFORE
+    # setup.py and scans files in third_party/ submodules (e.g. mslk, cutlass,
+    # fbgemm). Without initialization, hipify crashes on missing files.
+    # This also handles branch switches (e.g. develop → release/2.11) where
+    # new submodules were added since the last clone.
+    info "Synchronizing PyTorch submodules..."
+    git submodule sync --quiet
+    git submodule update --init --recursive
+
     # Convert CUDA references to HIP equivalents (required for ROCm builds)
     if [[ -f "tools/amd_build/build_amd.py" ]]; then
         info "Running AMD HIP conversion (tools/amd_build/build_amd.py)..."
@@ -1644,6 +1707,19 @@ HIPEOF
 // This file intentionally left empty to prevent duplicate symbol at link time.
 #pragma once
 EOF
+    fi
+
+    # Force CMake reconfigure if ROCM_SOURCE_DIR changed. PyTorch's
+    # Dependencies.cmake:1665 defaults ROCM_SOURCE_DIR to /opt/rocm when
+    # the env var is unset. If the build/ cache was created without
+    # ROCM_SOURCE_DIR exported, kineto gets -I/opt/rocm/include/roctracer
+    # instead of -I${ROCM_PATH}/include/roctracer. Check build.ninja for
+    # the stale path and delete CMakeCache.txt to force reconfigure;
+    # ninja preserves already-built .o files for incremental build.
+    export ROCM_SOURCE_DIR="${ROCM_PATH}"
+    if [[ -f "build/build.ninja" ]] && grep -q '/opt/rocm/include/roctracer' build/build.ninja 2>/dev/null; then
+        info "Removing stale CMake cache (roctracer include path points to /opt/rocm)..."
+        rm -f build/CMakeCache.txt
     fi
 
     # Step 1: Build the wheel. pip wheel runs cmake (incremental if build/
@@ -1704,6 +1780,28 @@ EOF
     if [[ -f "torch/lib/libtorch_hip.so" ]] && ! readelf -d "torch/lib/libtorch_hip.so" 2>/dev/null | grep -q 'librocm_smi64'; then
         info "  Adding librocm_smi64.so to libtorch_hip.so NEEDED"
         patchelf --add-needed librocm_smi64.so "torch/lib/libtorch_hip.so"
+    fi
+
+    # Add libomp.so (LLVM OpenMP runtime) to the wheel. PyTorch's CMake
+    # links libtorch_cpu.so against libgomp.so.1 (GNU OpenMP), but amdclang-
+    # compiled code uses LLVM OpenMP symbols (__kmpc_fork_call etc.) that
+    # libgomp doesn't provide. Copy libomp.so into torch/lib/ and add it
+    # as a NEEDED dependency to libtorch_cpu.so.
+    if [[ -f "torch/lib/libtorch_cpu.so" ]]; then
+        local _libomp="${LOCAL_PREFIX}/lib/llvm/lib/libomp.so"
+        if [[ -f "${_libomp}" ]]; then
+            cp -f "${_libomp}" torch/lib/
+            if ! readelf -d "torch/lib/libtorch_cpu.so" 2>/dev/null | grep -q 'libomp.so'; then
+                info "  Adding libomp.so to libtorch_cpu.so NEEDED"
+                patchelf --add-needed libomp.so "torch/lib/libtorch_cpu.so"
+            fi
+            # Ensure $ORIGIN is in RPATH so libomp.so resolves from torch/lib/
+            local _cpu_rpath
+            _cpu_rpath="$(patchelf --print-rpath "torch/lib/libtorch_cpu.so" 2>/dev/null || true)"
+            if [[ "${_cpu_rpath}" != *'$ORIGIN'* ]]; then
+                patchelf --add-rpath '$ORIGIN' "torch/lib/libtorch_cpu.so" 2>/dev/null || true
+            fi
+        fi
     fi
 
     # Repack the wheel using Python's zipfile (zip may not be installed)
@@ -1822,6 +1920,9 @@ build_torchvision() {
 
     # TorchVision build flags from YAML (build-step-local)
     setup_build_env torchvision
+
+    # Install Python build deps from YAML manifest (e.g. setuptools<81)
+    install_pkg_deps torchvision
 
     info "Building TorchVision wheel..."
     mkdir -p "${WHEELS_DIR}"
@@ -1966,6 +2067,51 @@ build_aotriton() {
 
     info "Building AOTriton for gfx1151..."
     info "This pre-compiles Triton attention kernels to HSACO (no JIT at inference time)."
+
+    # Initialize submodules. AOTriton's build does `pip install .` in
+    # third_party/triton — the submodule must be checked out.
+    info "Synchronizing AOTriton submodules..."
+    git submodule sync --quiet
+    git submodule update --init --recursive
+
+    # Restore Triton submodules to clean state before patching. Previous
+    # build runs may have left sed-patches on setup.py / CMakeLists.txt.
+    # git checkout is idempotent and ensures patches apply to pristine files.
+    local _triton_dir="${AOTRITON_SRC}/third_party/triton"
+    git -C "${_triton_dir}" checkout -- setup.py CMakeLists.txt 2>/dev/null || true
+    git -C "${_triton_dir}/third_party/nvidia" checkout -- CMakeLists.txt 2>/dev/null || true
+
+    # Triton's setup.py hardcodes ["nvidia", "amd"] backends. We need both:
+    # - "amd" for AMD codegen (our target arch gfx1151)
+    # - "nvidia" because Triton core (lib/Dialect/TritonGPU/Transforms/) now
+    #   depends on the NVWS dialect from third_party/nvidia/ — its TableGen
+    #   .h.inc files are only generated when the nvidia backend is loaded.
+    # The GSan CUDA runtime (sm_80) is disabled separately below.
+    # Reorder to ["amd", "nvidia"] so AMD is the primary codegen backend.
+    local _triton_setup="${_triton_dir}/setup.py"
+    if [[ -f "${_triton_setup}" ]] && grep -q '"nvidia", "amd"' "${_triton_setup}"; then
+        info "Patching Triton setup.py: reorder backends to [\"amd\", \"nvidia\"]"
+        sed -i 's/\["nvidia", "amd"\]/["amd", "nvidia"]/' "${_triton_setup}"
+    else
+        warn "Triton setup.py: expected '\"nvidia\", \"amd\"' not found (already patched?)"
+    fi
+
+    # The GSan runtime in third_party/nvidia/CMakeLists.txt builds a CUDA
+    # kernel (gsan.ll for sm_80) requiring CUDA+GCC, not available on a
+    # ROCm-only system. Disable the GSan target — the rest of the nvidia
+    # backend (NVWS dialect, NVGPUToLLVM, etc.) is pure C++/MLIR and builds
+    # fine without CUDA.
+    local _nvidia_cmake="${_triton_dir}/third_party/nvidia/CMakeLists.txt"
+    if [[ -f "${_nvidia_cmake}" ]] && grep -q 'add_custom_target(TritonNVIDIAGSanRuntime ALL' "${_nvidia_cmake}"; then
+        info "Patching NVIDIA CMakeLists.txt: disable GSan runtime (CUDA-only)"
+        sed -i 's/add_custom_target(TritonNVIDIAGSanRuntime ALL/# Disabled on ROCm: add_custom_target(TritonNVIDIAGSanRuntime ALL/' "${_nvidia_cmake}"
+        sed -i 's/add_dependencies(TritonNVIDIA TritonNVIDIAGSanRuntime)/# Disabled on ROCm: add_dependencies(TritonNVIDIA TritonNVIDIAGSanRuntime)/' "${_nvidia_cmake}"
+    fi
+
+    # Reduce build scope: skip unit tests (saves googletest download + compile).
+    # TRITON_APPEND_CMAKE_ARGS is read by setup.py and appended to the cmake
+    # invocation. This does not affect the AOTriton cmake build itself.
+    export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"
 
     # Apply patches from YAML (remove stray rebase 'pick' line)
     apply_patches aotriton "${AOTRITON_SRC}"
@@ -2584,6 +2730,11 @@ CONSTRAINTS_EOF
 build_vllm() {
     log_step 24 "Build vLLM"
 
+    if should_skip_step vllm; then
+        cd "${VLLM_DIR}"
+        return
+    fi
+
     cd "${VLLM_SRC}"
 
     # Ensure vllm-env.sh flags are active (CC, CXX, CFLAGS, AOTRITON_INSTALL_DIR)
@@ -2719,6 +2870,11 @@ patch_flash_amdsmi() {
 build_flash_attention() {
     log_step 28 "Build Flash Attention"
 
+    if should_skip_step flash_attention; then
+        cd "${VLLM_DIR}"
+        return
+    fi
+
     cd "${FLASH_ATTN_SRC}"
 
     # Flags come from vllm-env.sh (CFLAGS, CXXFLAGS, CMAKE_*_FLAGS_RELEASE).
@@ -2812,6 +2968,11 @@ with open('${_fa_setup}', 'w') as f:
 # are from the same commit.
 rebuild_aiter() {
     log_step 28 "Rebuild AITER from source (CK-aligned)"
+
+    if should_skip_step aiter; then
+        cd "${VLLM_DIR}"
+        return
+    fi
 
     local aiter_src="${VLLM_DIR}/pytorch/third_party/aiter"
     if [[ ! -d "${aiter_src}" || ! -f "${aiter_src}/setup.py" ]]; then
@@ -3688,6 +3849,23 @@ warmup_aiter_jit() {
     fi
     info "AITER JIT directory: ${jit_dir}"
 
+    # Fast path: if all expected .so files are already present from a prior
+    # pre-warm run, skip the entire loop. This avoids re-importing torch+aiter
+    # and iterating 67 modules just to print "already built" for each.
+    local _existing_so_count
+    _existing_so_count="$(find "${jit_dir}" -maxdepth 1 -name '*.so' -type f 2>/dev/null | wc -l)"
+    if [[ "${_existing_so_count}" -gt 0 ]]; then
+        local _total_modules _skip_count
+        _total_modules="$(ycfg '.packages.aiter.jit_skip_modules[]' 2>/dev/null | wc -l)"
+        local _expected_so=$(( 67 - _total_modules ))
+        if [[ "${_existing_so_count}" -ge "${_expected_so}" ]]; then
+            success "AITER JIT cache intact (${_existing_so_count} .so files, ${_expected_so} expected) — skipping pre-warm"
+            return 0
+        else
+            info "AITER JIT cache partial (${_existing_so_count}/${_expected_so} .so files) — continuing pre-warm"
+        fi
+    fi
+
     # AITER uses PyTorch's FileBaton, which waits forever if a prior run
     # crashed and left lock_* files behind. Clear any dead baton files before
     # starting the serial pre-warm loop.
@@ -4254,7 +4432,7 @@ build_rust_wheels() {
         info "orjson wheel already exists: $(basename "${_orjson_wheel}")"
     else
         info "Building orjson from source with Zen 5 optimizations..."
-        pip wheel orjson \
+        pip wheel "orjson<3.11.9" \
             --no-binary orjson \
             --no-cache-dir \
             --no-deps \
@@ -4654,7 +4832,7 @@ clone_and_build_lemonade() {
         cmake --build "${LLAMACPP_CPU_DIR}" -j "$(nproc)"
 
         # Finalize (flatten, patchelf, version)
-        finalize_llamacpp_backend "${LLAMACPP_ROCM_DIR}"   "rocm" "skip"
+        finalize_llamacpp_backend "${LLAMACPP_ROCM_DIR}"   "rocm"
         finalize_llamacpp_backend "${LLAMACPP_VULKAN_DIR}" "vulkan"
         finalize_llamacpp_backend "${LLAMACPP_CPU_DIR}"    "cpu"
     fi
@@ -4806,6 +4984,7 @@ main() {
     info "Build log: ${VLLM_LOG}"
     info "Start step: ${START_STEP}"
     info "Rebuild: ${REBUILD}"
+    [[ -n "${FORCE_REBUILD_PKGS}" ]] && info "Force rebuild: ${FORCE_REBUILD_PKGS}"
     info "Components: TheRock → AOCL-LibM → Python → PyTorch → Triton → AOTriton → vLLM → Flash Attention → Optimized Wheels → Lemonade → Smoke Test"
     echo ""
 
