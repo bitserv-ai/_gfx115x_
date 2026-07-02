@@ -89,9 +89,7 @@ Phase F: Attention (Flash Attention + AITER)
  27. Patch Flash Attention
 
 Phase G: Validation + Warmup
- 29. Smoke test
- 29b. AITER JIT pre-warm   (compile all buildable modules ahead of time)
- 29c. TunableOp warmup     (populate GEMM autotuning CSV)
+  29. Smoke test + AITER JIT pre-warm
 
 Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
  30. Build Rust wheels     (orjson, cryptography — AVX-512 + VAES)
@@ -100,7 +98,7 @@ Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
 
 Phase I: Lemonade Inference Server
   33. Clone Lemonade + build llama.cpp (ROCm + Vulkan + CPU backends)
-  34. Install Lemonade SDK from PyPI
+  34. Install Lemonade Server from source
   35. Validate Lemonade (all backends)
   36. Backend smoke test
 ```
@@ -394,6 +392,20 @@ Or simply source the activation script:
 
 ```bash
 source /path/to/_gfx115x_/vllm-env.sh
+```
+
+### System Tuning (Optional)
+
+For inference workloads on Strix Halo, the following sysfs/sysctl settings
+improve latency and throughput:
+
+```bash
+# Lock GPU clocks to maximum (prevents iGPU downclock under light load)
+echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
+
+# Disable NUMA balancing (prevents page migration latency spikes)
+echo 0 | sudo tee /proc/sys/kernel/numa_balancing
+# Or persist: echo "kernel.numa_balancing = 0" | sudo tee /etc/sysctl.d/99-numa-balancing.conf
 ```
 
 ## Runtime Management

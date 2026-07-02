@@ -62,9 +62,7 @@
 #    27. Patch Flash Attention
 #
 #   Phase G: Validation + Warmup
-#    29. Smoke test
-#    29b. AITER JIT pre-warm (compile all buildable modules ahead of time)
-#    29c. TunableOp warmup (populate GEMM autotuning CSV)
+#    29. Smoke test + AITER JIT pre-warm
 #
 #   Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
 #    30. Build Rust wheels      (orjson, cryptography — AVX-512 + VAES)
@@ -1515,7 +1513,25 @@ configure_therock() {
         -DTHEROCK_ENABLE_EMULATION=OFF \
         -DTHEROCK_ENABLE_HIPDNN_INTEGRATION_TESTS=OFF \
         -DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF \
-        -DTHEROCK_ENABLE_CORE_RUNTIME_TESTS=OFF
+        -DTHEROCK_ENABLE_CORE_RUNTIME_TESTS=OFF \
+        -DTHEROCK_ENABLE_HOST_MATH=OFF \
+        -DTHEROCK_ENABLE_ROCALUTION=OFF \
+        -DTHEROCK_ENABLE_ROCWMMA=OFF \
+        -DTHEROCK_ENABLE_HIPTENSOR=OFF \
+        -DTHEROCK_ENABLE_ROCSHMEM=OFF \
+        -DTHEROCK_ENABLE_MEDIA_LIBS=OFF \
+        -DTHEROCK_ENABLE_HOTSWAP=OFF \
+        -DTHEROCK_COMPOSABLE_KERNEL_FOR_MIOPEN_ONLY=ON
+        # Sub-project groups disabled (not needed by vLLM/PyTorch):
+        #   HOST_MATH:    host BLAS, suite-sparse, fftw3 (K.6)
+        #   ROCALUTION:   iterative sparse solver (not used by LLM inference)
+        #   ROCWMMA:      matrix-multiply-accumulate ops (not used by vLLM)
+        #   HIPTENSOR:    tensor contraction library (not used by vLLM)
+        #   ROCSHMEM:     shared-memory MPC (single-GPU, unnecessary)
+        #   MEDIA_LIBS:   rocdecode/rocjpeg + Mesa sysdep (no video decode)
+        #   HOTSWAP:      comgr hotswap (inference-only, unnecessary)
+        #   CK_FOR_MIOPEN_ONLY: Composable Kernel only via MIOpen, not standalone
+        # RCCL remains active (PyTorch USE_RCCL=1 ABI dependency).
         # Profiler disabled: rocprofiler-sdk's vendored yaml-cpp and elfio
         # have missing <cstdint> includes under modern compilers (Clang 18+,
         # GCC 15+). Profiling is not needed for vLLM inference.
@@ -2534,12 +2550,15 @@ with open('${_models_config}', 'w') as f:
         info "models/config.py: platform block_size alignment already present"
     fi
 
-    # Patch 26: rocm.py — skip AITER attention backends for hybrid models (Bug #17)
-    # Hybrid models (e.g. Qwen3.5 GDN) compute non-power-of-2 block sizes from
-    # mamba state alignment (e.g. 576).  AITER unified attention and FA use
-    # TILE_SIZE = block_size in Triton tl.arange(), which requires power of 2
-    # and must fit in LDS.  Skip AITER attention for hybrid models so they fall
-    # through to TRITON_ATTN which decouples tile size from block size.
+    # Patch 26: OBSOLETE — rocm.py _get_backend_priorities() was refactored
+    # in vLLM v0.24.0. The inline Python below expected the old env-var-based
+    # "Priority 1/2/3" layout, which no longer exists. The new code uses
+    # is_mha_enabled() / is_aiter_found_and_supported() dispatch directly.
+    # Patch 27 (supports_block_size power-of-2 check) already covers the
+    # hybrid model use case by rejecting non-power-of-2 block sizes at the
+    # backend selection level. The inline code below is a no-op (the grep
+    # guard prevents re-application, and the old string doesn't match).
+    # Left in place for documentation; will be removed in next cleanup.
     local _rocm_py="${VLLM_SRC}/vllm/platforms/rocm.py"
     if [[ -f "${_rocm_py}" ]] && ! grep -q '_is_hybrid' "${_rocm_py}"; then
         info "Patching rocm.py: skip AITER attention for hybrid models"
@@ -2966,7 +2985,7 @@ build_flash_attention() {
     triton_loc_before="$(python -c "import triton; print(triton.__file__)" 2>/dev/null || echo 'none')"
     info "Triton location before FA build: ${triton_loc_before}"
 
-    # Apply patches from YAML (amdsmi prepend is step 27, handled by patch_flash_amdsmi)
+    # Apply patches from YAML (amdsmi import was Step 27, handled by patch_flash_amdsmi)
     apply_patches flash_attention "${FLASH_ATTN_SRC}"
 
     # Patch setup.py to skip internal AITER install (we build AITER separately in step 28b)
@@ -3994,8 +4013,14 @@ warmup_aiter_jit() {
     cd "${_prewarm_dir}"
 
     # Run the pre-warm script. Builds all modules except the skip list.
+    # Uses ThreadPoolExecutor for parallel compilation — AITER's build_module
+    # shells out to ninja (CPU-bound HIP compilation). FileBaton locking
+    # inside AITER serializes duplicate module builds safely. max_workers
+    # is capped at nproc//2 to avoid memory pressure from concurrent
+    # offline HIP compilations.
     AITER_JIT_SKIP="${skip_list}" python -c "
 import os, sys, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from aiter.jit.core import get_args_of_build, build_module, get_user_jit_dir
 
@@ -4011,8 +4036,12 @@ newly_built = 0
 failed = 0
 skipped = 0
 
+max_workers = max(1, os.cpu_count() // 2)
 print(f'AITER JIT pre-warm: {total} modules ({buildable} buildable, {len(skip_modules)} CDNA-only skipped)')
+print(f'  Parallel workers: {max_workers}')
 
+# Separate modules into skip/already_built/to_build lists
+to_build = []
 for i, mod_cfg in enumerate(all_ops_list, 1):
     md_name = mod_cfg['md_name']
     so_path = os.path.join(jit_dir, f'{md_name}.so')
@@ -4027,6 +4056,11 @@ for i, mod_cfg in enumerate(all_ops_list, 1):
         already_built += 1
         continue
 
+    to_build.append((i, mod_cfg, so_path))
+
+def compile_one(args):
+    i, mod_cfg, so_path = args
+    md_name = mod_cfg['md_name']
     print(f'  [{i:2d}/{total}] {md_name}: compiling...', flush=True)
     start = time.perf_counter()
     try:
@@ -4047,15 +4081,25 @@ for i, mod_cfg in enumerate(all_ops_list, 1):
         )
         elapsed = time.perf_counter() - start
         if os.path.exists(so_path):
-            print(f'           compiled in {elapsed:.1f}s')
-            newly_built += 1
+            print(f'  [{i:2d}/{total}] {md_name}: compiled in {elapsed:.1f}s', flush=True)
+            return ('built', md_name, elapsed)
         else:
-            print(f'           build_module returned but .so not found ({elapsed:.1f}s)')
-            failed += 1
+            print(f'  [{i:2d}/{total}] {md_name}: build_module returned but .so not found ({elapsed:.1f}s)', flush=True)
+            return ('failed', md_name, elapsed)
     except (Exception, SystemExit) as e:
         elapsed = time.perf_counter() - start
-        print(f'           FAILED ({elapsed:.1f}s): {e}')
-        failed += 1
+        print(f'  [{i:2d}/{total}] {md_name}: FAILED ({elapsed:.1f}s): {e}', flush=True)
+        return ('failed', md_name, elapsed)
+
+if to_build:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(compile_one, args): args for args in to_build}
+        for future in as_completed(futures):
+            status, md_name, elapsed = future.result()
+            if status == 'built':
+                newly_built += 1
+            else:
+                failed += 1
 
 print()
 print(f'AITER JIT pre-warm complete:')

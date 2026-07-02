@@ -22,6 +22,8 @@
 #   VLLM_<ROLE>_CPU_OFFLOAD_GB     - CPU weight offload in GB via UVA (optional)
 #   VLLM_<ROLE>_LIMIT_MM_PER_PROMPT - MM limits per prompt, e.g. '{"video":0,"image":1}' (optional)
 #   VLLM_<ROLE>_SKIP_MM_PROFILING   - Skip multimodal encoder profiling (optional, NOT recommended for VL models)
+#   VLLM_<ROLE>_ENFORCE_EAGER      - Disable CUDA graph capture (optional, default: true)
+#   VLLM_<ROLE>_MAX_NUM_BATCHED_TOKENS - Max tokens per batch (optional, vLLM default: 8192)
 #   VLLM_<ROLE>_EXTRA_ARGS         - Additional vLLM CLI args (optional)
 #
 # Prerequisites:
@@ -119,8 +121,19 @@ vllm_is_aiter_rmsnorm_duplicate_pattern_failure() {
 
     [[ -f "${log_file}" ]] || return 1
 
+    # Primary signature: both rocm_aiter_fusion.py and check_and_add_duplicate_pattern
+    # must appear in the log (file name + function name).
     grep -q "rocm_aiter_fusion.py" "${log_file}" \
         && grep -q "check_and_add_duplicate_pattern" "${log_file}"
+    if [[ $? -eq 0 ]]; then
+        return 0
+    fi
+
+    # Fallback: match the actual RuntimeError exception message that torch's
+    # pattern_matcher emits when skip_duplicates is not set:
+    # "Duplicate pattern X has already been registered"
+    grep -q "Duplicate pattern.*already been registered" "${log_file}" \
+        && grep -q "rocm_aiter_fusion" "${log_file}"
 }
 
 # Print targeted diagnostics for the duplicate-pattern startup crash.
@@ -207,7 +220,7 @@ start_instance() {
     local role="$1"
 
     # Read per-role configuration via helper.
-    local model port device gpu_memory_mb attention_backend extra_args max_model_len quantization max_num_seqs enforce_eager runner convert trust_remote_code hf_overrides kv_cache_dtype cpu_offload_gb limit_mm_per_prompt skip_mm_profiling
+    local model port device gpu_memory_mb attention_backend extra_args max_model_len quantization max_num_seqs max_num_batched_tokens enforce_eager runner convert trust_remote_code hf_overrides kv_cache_dtype cpu_offload_gb limit_mm_per_prompt skip_mm_profiling
     model="$(vllm_role_config "${role}" MODEL)"
     port="$(vllm_role_config "${role}" PORT)"
     device="$(vllm_role_config "${role}" DEVICE)"
@@ -216,6 +229,7 @@ start_instance() {
     max_model_len="$(vllm_role_config "${role}" MAX_MODEL_LEN)"
     quantization="$(vllm_role_config "${role}" QUANTIZATION)"
     max_num_seqs="$(vllm_role_config "${role}" MAX_NUM_SEQS)"
+    max_num_batched_tokens="$(vllm_role_config "${role}" MAX_NUM_BATCHED_TOKENS)"
     enforce_eager="$(vllm_role_config "${role}" ENFORCE_EAGER)"
     runner="$(vllm_role_config "${role}" RUNNER)"
     convert="$(vllm_role_config "${role}" CONVERT)"
@@ -283,9 +297,15 @@ start_instance() {
         cmd_args+=(--max-num-seqs "${max_num_seqs}")
     fi
 
+    if [[ -n "${max_num_batched_tokens}" ]]; then
+        cmd_args+=(--max-num-batched-tokens "${max_num_batched_tokens}")
+    fi
+
     # CRITICAL: Enable eager mode to allow CPU weight offloading in V1 engine.
     # This bypasses the AssertionError regarding input batch re-initialization.
-    # We default it to true but allow per-role disabling (e.g. for FP8 models).
+    # Default: true (safe). Set to false per-role via VLLM_<ROLE>_ENFORCE_EAGER=false
+    # for LLM-only models to enable CUDA graph capture (15-30% decode throughput).
+    # VL models and CPU-offload roles should keep true (OOM risk + offload incompat).
     if [[ "${enforce_eager:-true}" == "true" ]]; then
         cmd_args+=(--enforce-eager)
     fi
@@ -353,9 +373,15 @@ start_instance() {
         info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
     fi
 
-    # Append extra args (word-split intentionally).
-    # shellcheck disable=SC2206
-    cmd_args+=(${extra_args})
+    # Append extra args (word-split intentionally for space-separated CLI flags).
+    # Validate via read -r -a to catch unbalanced quotes early.
+    if [[ -n "${extra_args}" ]]; then
+        local -a _extra_args_array=()
+        read -r -a _extra_args_array <<< "${extra_args}"
+        if [[ ${#_extra_args_array[@]} -gt 0 ]]; then
+            cmd_args+=("${_extra_args_array[@]}")
+        fi
+    fi
 
     # AITER RMSNorm duplicate-pattern retry fallback.
     # Enabled via VLLM_ENABLE_AITER_RMSNORM_DUP_PATTERN_RETRY=1.

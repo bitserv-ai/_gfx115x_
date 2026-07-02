@@ -1,0 +1,13 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/platforms/rocm.py b/vllm/platforms/rocm.py
+--- a/vllm/platforms/rocm.py
++++ b/vllm/platforms/rocm.py
+@@ -872,7 +872,7 @@
+ 
+     @classmethod
+     def supports_fp8(cls) -> bool:
+-        return on_gfx9() or on_gfx12x()
++        return on_gfx9() or on_gfx12x() or on_gfx1x()
+ 
+     @classmethod
+     def is_fp8_fnuz(cls) -> bool:

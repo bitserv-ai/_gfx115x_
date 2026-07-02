@@ -161,6 +161,10 @@ unset _BASE_CFLAGS _BASE_LDFLAGS _POLLY_FLAGS _AOCL_LDFLAGS _THEROCK_CLANG _AMD_
 
 export PYTORCH_ROCM_ARCH="gfx1151"
 export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+# HSA_OVERRIDE_GFX_VERSION: Safety-Net für den Fall, dass TheRock/ROCm die
+# gfx1151 ISA nicht in ihrer internen Architektur-Tabelle haben. Solange
+# rocminfo "gfx1151" korrekt meldet, ist der Override ein No-op. Beibehalten
+# bis nach einem TheRock-Upgrade explizit via rocminfo verifiziert wurde.
 export HSA_OVERRIDE_GFX_VERSION="11.5.1"
 
 # HIP GPU compiler flags for gfx1151 (Strix Halo RDNA 3.5 iGPU, 40 CUs)
@@ -310,6 +314,13 @@ export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx11510.csv"
 # active, verified with Qwen2.5-7B-Instruct inference.
 unset TORCH_COMPILE_DISABLE 2>/dev/null || true
 
+# HIP Memory Allocator: expandable segments reduce UMA fragmentation on
+# the 48 GB framebuffer carveout. Without this, repeated allocation/free
+# cycles (model loading, KV-cache growth) fragment the address space and
+# cause OOM despite sufficient free memory. expandable_segments works
+# independently of hipMallocAsync (which ignores max_split_size_mb).
+export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"
+
 # AOTriton experimental: enables gfx11xx experimental kernel paths in the
 # AOTriton (Ahead-Of-Time Triton) library. Required for Strix Halo gfx1151.
 export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
@@ -339,6 +350,13 @@ export MIOPEN_FIND_MODE=2
 # inherits this corrupted HIP state, causing hipErrorInvalidValue from
 # cudaMemGetInfo. Forcing spawn ensures a clean HIP context per process.
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+# NUMA balancing: disable for inference workloads. The kernel's automatic
+# NUMA balancing migrates pages between nodes, causing latency spikes on
+# memory-bound GEMM kernels. On Strix Halo (single NUMA node), this is a
+# no-op, but it's good practice for multi-socket deployments.
+# Runtime: sysctl kernel.numa_balancing=0
+# Persistent: /etc/sysctl.d/99-numa-balancing.conf
 
 # =============================================================================
 # Triton Compiler Optimization
@@ -459,6 +477,7 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    hipBLASLt:        ${TORCH_BLAS_PREFER_HIPBLASLT:-disabled}"
     echo "    TunableOp:        ${PYTORCH_TUNABLEOP_ENABLED:-disabled}"
     echo "    TunableOp file:   ${PYTORCH_TUNABLEOP_FILENAME:-<not set>}"
+    echo "    HIP_ALLOC_CONF:   ${PYTORCH_HIP_ALLOC_CONF:-<not set>}"
     echo ""
     echo "  Rust:"
     echo "    RUSTFLAGS:        ${RUSTFLAGS}"

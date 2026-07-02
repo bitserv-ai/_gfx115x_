@@ -227,6 +227,31 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
 - **AOTriton LLVM WERROR failures** (BUILD-FIXES #149): Added
   `-DLLVM_ENABLE_WERROR=OFF` to `TRITON_APPEND_CMAKE_ARGS` — eliminates 7
   guaranteed build failures from missing NVWS tablegen headers.
+- **HIP allocator fragmentation fix** (BUILD-FIXES #150): Added
+  `PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"` to `vllm-env.sh`.
+  Reduces UMA fragmentation on 48 GB framebuffer carveout.
+- **EXTRA_ARGS validation** (BUILD-FIXES #151): Replaced unquoted word-split
+  with `read -r -a` to catch unbalanced quotes in `.env` EXTRA_ARGS.
+- **AITER RMSNorm detection** (BUILD-FIXES #152): Added fallback exception
+  message pattern for more robust duplicate-pattern crash detection.
+- **Patch 26 obsolete** (BUILD-FIXES #153): `_is_hybrid` guard in rocm.py
+  is a no-op after vLLM v0.24.0 refactor. Patch 27 covers the use case.
+- **TheRock sub-project cleanup** (BUILD-FIXES #154): Disabled 8 unused
+  sub-projects (ROCALUTION, ROCWMMA, HIPTENSOR, ROCSHMEM, MEDIA_LIBS,
+  HOST_MATH, HOTSWAP, CK standalone). ~30-45 min build time reduction.
+- **AITER JIT parallel compilation** (BUILD-FIXES #155): Replaced serial
+  loop with `ThreadPoolExecutor(max_workers=nproc//2)`. Expected ~5-8×
+  speedup (1h42min → ~15-20min).
+- **FP8 platform flag for gfx1x** (Patch #40): `supports_fp8()` now returns
+  True on RDNA 3.5. FP8 KV-Cache already worked via #35; this unblocks
+  FP8 weight quantization at the platform level.
+- **MAX_NUM_BATCHED_TOKENS role-config**: New per-role config option
+  `VLLM_<ROLE>_MAX_NUM_BATCHED_TOKENS` in `vllm-start.sh`.
+- **Redundant YAML patches removed**: amdsmi `prepend` entries for vLLM
+  and Flash Attention — already handled by `patch_amdsmi_import()`/
+  `patch_flash_amdsmi()` functions.
+- **README fixes**: Step 34 "PyPI" → "Source"; Steps 29b/29c consolidated;
+  GPU clock lock + NUMA tuning documented.
 
 ## [0.4.0] - 2026-06-29
 

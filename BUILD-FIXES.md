@@ -3126,3 +3126,88 @@ so missing-include warnings become hard errors.
 **Fix:** Added `-DLLVM_ENABLE_WERROR=OFF` to `TRITON_APPEND_CMAKE_ARGS`
 in `build_aotriton()`. This is passed through by `setup.py` to the cmake
 invocation. Eliminates 7 guaranteed failures per cold run.
+
+### 150. HIP allocator fragmentation on 48 GB UMA
+
+**Symptom:** OOM errors during model loading or KV-cache growth despite
+sufficient free memory reported by `rocm-smi`.
+
+**Root cause:** The default HIP memory allocator uses fixed-size pools
+with no segment expansion. On the 48 GB UMA framebuffer carveout, repeated
+allocation/free cycles (model loading, KV-cache resize) fragment the
+address space, causing allocation failures at ~70-80% utilization.
+
+**Fix:** Set `PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"` in
+`vllm-env.sh`. This enables the expandable segments allocator, which
+grows segments on demand and reduces fragmentation. Works independently
+of `hipMallocAsync` (which ignores `max_split_size_mb`).
+
+### 151. EXTRA_ARGS word-splitting without validation
+
+**Symptom:** Unbalanced quotes in `.env` `VLLM_<ROLE>_EXTRA_ARGS` cause
+silent argument corruption — vLLM receives truncated or wrong arguments
+with no error at the shell level.
+
+**Root cause:** `cmd_args+=(${extra_args})` performs unquoted word-splitting
+without any validation. Malformed strings produce silent garbage.
+
+**Fix:** Replaced with `read -r -a _extra_args_array <<< "${extra_args}"`
+which validates the string before expansion. Balanced quotes produce the
+same result; unbalanced quotes are caught by `read`.
+
+### 152. AITER RMSNorm duplicate-pattern detection too narrow
+
+**Symptom:** Runtime crash on missing `skip_duplicates` patch not detected
+by `vllm_is_aiter_rmsnorm_duplicate_pattern_failure()` when the exception
+message format differs from the file/function name heuristic.
+
+**Root cause:** Detection only matched two grep patterns: `rocm_aiter_fusion.py`
+and `check_and_add_duplicate_pattern`. If the exception is raised from a
+different callframe or the traceback format changes, detection fails.
+
+**Fix:** Added fallback pattern: match `Duplicate pattern.*already been
+registered` error message in conjunction with `rocm_aiter_fusion` module
+name. More robust against traceback format variations.
+
+### 153. Patch 26 (_is_hybrid guard) obsolete after rocm.py refactor
+
+**Symptom:** Inline Python `content.replace(old, new, 1)` is a no-op —
+the `old` string doesn't match the current `rocm.py` content.
+
+**Root cause:** vLLM v0.24.0 refactored `_get_backend_priorities()` from
+direct env-var checks (`Priority 1/2/3` layout) to `is_mha_enabled()` /
+`is_aiter_found_and_supported()` dispatch. The old pattern no longer exists.
+
+**Fix:** Marked Patch 26 as OBSOLETE. The hybrid model use case is fully
+covered by Patch 27 (`supports_block_size` power-of-2 check), which
+rejects non-power-of-2 block sizes at the backend selection level.
+
+### 154. TheRock builds unnecessary sub-projects
+
+**Symptom:** TheRock SDK build takes 3+ hours. Several sub-projects
+(rocalution, rocwmma, hiptensor, rocshmem, media_libs, host_math, hotswap)
+are built but never used by vLLM or PyTorch.
+
+**Root cause:** TheRock's default CMake configuration enables all
+sub-projects unless explicitly disabled.
+
+**Fix:** Added 8 `-D` flags to `configure_therock()` cmake invocation:
+`THEROCK_ENABLE_HOST_MATH=OFF`, `ROCALUTION=OFF`, `ROCWMMA=OFF`,
+`HIPTENSOR=OFF`, `ROCSHMEM=OFF`, `MEDIA_LIBS=OFF`, `HOTSWAP=OFF`,
+`THEROCK_COMPOSABLE_KERNEL_FOR_MIOPEN_ONLY=ON`. RCCL remains active
+(PyTorch `USE_RCCL=1` ABI dependency). Expected build time reduction:
+~30-45 min.
+
+### 155. AITER JIT pre-warm serial compilation
+
+**Symptom:** AITER JIT pre-warm takes ~1h42min on first run with 51
+modules to compile. Each `build_module()` call blocks until the next.
+
+**Root cause:** The pre-warm Python script iterates modules serially via
+a `for` loop, despite each `build_module()` shelling out to ninja (CPU-bound
+offline HIP compilation). No parallelism between independent modules.
+
+**Fix:** Replaced serial loop with `ThreadPoolExecutor(max_workers=nproc//2)`.
+Each module is submitted as a task; `as_completed()` collects results.
+AITER's internal FileBaton locking serializes duplicate module builds
+safely. Expected speedup: ~5-8× (from ~1h42min to ~15-20min).

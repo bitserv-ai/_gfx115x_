@@ -279,6 +279,10 @@ packages:
       - pytest
       - mako
       - zstandard
+      # pytest: TheRock's CMake FetchContent may pull pytest even with
+      # BUILD_TESTING=OFF (e.g. via hipBLASLt's test harness or rocm-cmake
+      # validation). Keeping it avoids potential find_package failures.
+      - pytest
     notes: |
       TheRock MUST be built with GCC -- rocprofiler-systems has an explicit
       GNU compiler check that blocks Clang. TheRock produces amdclang (AMD's
@@ -839,6 +843,11 @@ packages:
     compiler: amdclang
     skip_marker: null
     skip_check:
+      # Note: torch.cuda.is_available() requires a GPU driver at build time.
+      # On Strix Halo (integrated GPU always present) this is safe. For
+      # headless build hosts without amdgpu driver, this check will fail and
+      # force a rebuild. The 'rocm' path fallback helps but is insufficient
+      # if the wheel was installed into the venv (not from source tree).
       type: import
       command: "import torch; print(torch.__version__) if ('rocm' in torch.__file__.lower() or torch.cuda.is_available()) else exit(1)"
       workdir: "${VLLM_DIR}"
@@ -1280,16 +1289,10 @@ packages:
       compilation fails, falls back to Triton-only build. Result is
       recorded in .aiter-status file ("enabled" or "disabled").
     patches:
-      # 1. amdsmi import order fix
-      - type: prepend
-        file: "vllm/__init__.py"
-        marker: "# PATCHED: amdsmi import order"
-        content_marker: "# PATCHED: amdsmi import order (must be before torch or it crashes)"
-        description: >
-          Insert "import amdsmi" before torch import to prevent module
-          reimport crash. amdsmi's C extension conflicts with torch's
-          ROCm initialization if loaded after torch. Uses Python script
-          to insert after module docstring.
+      # Note: amdsmi import order fix is applied inline by patch_amdsmi_import()
+      # in build-vllm.sh (Step 20). The function inserts import amdsmi before
+      # torch in vllm/__init__.py via a Python script that handles docstring
+      # detection. No YAML patch entry needed here.
 
       # 2. AITER top-level gate: open for gfx1x (replaces broken sed patches)
       - type: patch
@@ -1605,6 +1608,18 @@ packages:
           imports in try/except ImportError to gracefully degrade when knobs
           is unavailable.
 
+      # 40. Enable FP8 platform flag for gfx1x (RDNA 3.5)
+      - type: patch
+        path: "${VLLM_DIR}/patches/fp8-support-gfx1x.patch"
+        description: >
+          Extend supports_fp8() in rocm.py to include on_gfx1x(). Currently
+          only on_gfx9() or on_gfx12x() return True, blocking all FP8 paths
+          on gfx1151. FP8 KV-Cache (E5M2) already works via patch #35;
+          this flag unblocks FP8 weight quantization (W8A8) at the platform
+          level. Note: is_linear_fp8_enabled() (patch #7) still returns
+          False on gfx1x — CK GEMM crashes on RDNA. Only platform-level
+          FP8 support is enabled; per-feature gates remain independent.
+
   # ---------------------------------------------------------------------------
   # Phase F: Attention
   # ---------------------------------------------------------------------------
@@ -1636,14 +1651,8 @@ packages:
       Pure Python wheel -- kernels are JIT-compiled at runtime via Triton.
       FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE must be set.
     patches:
-      # 1. amdsmi import order fix (same issue as vLLM)
-      - type: prepend
-        file: "flash_attn/__init__.py"
-        marker: "# PATCHED: amdsmi import order"
-        content_marker: "# PATCHED: amdsmi import order (must be before torch or it crashes)"
-        description: >
-          Prepend "import amdsmi" before any torch imports. Same C extension
-          conflict as vLLM -- amdsmi must be loaded first.
+      # Note: amdsmi import order fix is applied inline by patch_flash_amdsmi()
+      # in build-vllm.sh (Step 27). No YAML prepend entry needed here.
 
       # 2. Skip internal AITER install (we build AITER separately in step 28b)
       - type: file_rewrite
