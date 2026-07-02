@@ -308,7 +308,7 @@ start_instance() {
         info "${role}: convert: ${convert}"
     fi
 
-    if [[ -n "${trust_remote_code}" ]]; then
+    if [[ "${trust_remote_code}" == "true" || "${trust_remote_code}" == "1" || "${trust_remote_code}" == "yes" ]]; then
         cmd_args+=(--trust-remote-code)
     fi
 
@@ -393,7 +393,7 @@ start_instance() {
         # Health check loop.
         info "Waiting for ${role} health check (timeout: ${VLLM_STARTUP_TIMEOUT}s)..."
 
-        if vllm_poll_health "${VLLM_HOST}" "${port}" "${VLLM_STARTUP_TIMEOUT}" "${instance_pid}"; then
+        if vllm_poll_health "127.0.0.1" "${port}" "${VLLM_STARTUP_TIMEOUT}" "${instance_pid}"; then
             success "vLLM ${role} ready (PID: ${instance_pid}, port: ${port})"
 
             # Log which attention backend was actually selected (parse vLLM log).
@@ -422,6 +422,11 @@ start_instance() {
                 && [[ "${launch_with_rmsnorm_disabled}" -eq 0 ]]; then
                 launch_with_rmsnorm_disabled=1
                 warn "${role}: detected AITER RMSNorm duplicate-pattern startup crash; retrying with VLLM_ROCM_USE_AITER_RMSNORM=0"
+                if kill -0 "${instance_pid}" 2>/dev/null; then
+                    kill -TERM "${instance_pid}" 2>/dev/null || true
+                    sleep 2
+                    kill -KILL "${instance_pid}" 2>/dev/null || true
+                fi
                 rm -f "${pid_file}"
                 continue
             fi
@@ -430,6 +435,14 @@ start_instance() {
         fi
 
         vllm_print_startup_failure_details "${log_file}"
+
+        if kill -0 "${instance_pid}" 2>/dev/null; then
+            warn "${role}: terminating leftover vLLM process (PID ${instance_pid})"
+            kill -TERM "${instance_pid}" 2>/dev/null || true
+            sleep 2
+            kill -KILL "${instance_pid}" 2>/dev/null || true
+        fi
+
         rm -f "${pid_file}"
         return 1
     done

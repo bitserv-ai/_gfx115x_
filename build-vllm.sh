@@ -30,7 +30,7 @@
 #   scripts/build-vllm.sh --step N    # Run from step N onward
 #   scripts/build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
 #
-# Build pipeline (35 steps):
+# Build pipeline (36 steps):
 #   Phase A: ROCm SDK (TheRock — builds amdclang used by everything downstream)
 #     1. Clone TheRock          3. Build TheRock
 #     2. Configure TheRock      4. Validate ROCm
@@ -75,6 +75,9 @@
 #    33. Clone Lemonade + build llama.cpp with hipBLAS for gfx1151
     #    34. Build Lemonade Server from source
 #    35. Validate Lemonade (server smoke test)
+#
+#   Phase J: Backend Validation
+#    36. Backend smoke test (vLLM + llama.cpp ROCm + llama.cpp Vulkan)
 
 set -euo pipefail
 
@@ -252,8 +255,15 @@ if [[ ! -w "${VLLM_DIR}" ]]; then
     die "${VLLM_DIR} is not writable by $(whoami). Fix ownership with:\n  sudo chown \$(id -u):\$(id -g) ${VLLM_DIR}"
 fi
 
-# Tee all output to build log
+# Tee all output to build log.
+# Known limitation (K.5): tee runs as a background process via process
+# substitution; its exit status is not propagated under pipefail. The
+# build log may lose the last few lines on abrupt exit (die/SIGKILL).
 exec > >(tee -a "${VLLM_LOG}") 2>&1
+
+# Cleanup stale markers on exit (prevents false JIT cache purge on next run
+# if validate_pytorch crashes between marker creation and removal)
+trap 'rm -f "${VLLM_DIR}/.pytorch-rebuilt-marker" 2>/dev/null || true' EXIT
 
 log_step() {
     local step_num="$1"
@@ -582,12 +592,14 @@ check_prerequisites() {
     cmake_version="$(cmake --version | head -1 | grep -oP '\d+\.\d+' | head -1)"
     success "CMake ${cmake_version}"
 
-    # Check required device nodes from manifest
+    # Check required device nodes from manifest (warn only — GPU not
+    # needed for CPU-only phases like CPython/AOCL. validate_rocm will
+    # enforce these before GPU-dependent steps.)
     local device_nodes
     mapfile -t device_nodes < <(ycfg '.prerequisites.device_nodes[]')
     for node in "${device_nodes[@]}"; do
         if [[ ! -e "${node}" ]]; then
-            die "${node} not found. Are kernel modules loaded? Required: $(ycfg '.platform.kernel_modules | join(", ")')"
+            warn "${node} not found. GPU steps will fail. Required: $(ycfg '.platform.kernel_modules | join(", ")')"
         fi
         success "Device node ${node} present"
     done
@@ -958,9 +970,26 @@ should_skip_step() {
         file_exists)
             local check_path
             check_path="$(ycfg ".packages.${pkg_key}.skip_check.path")"
-            if [[ -f "${LOCAL_PREFIX}/${check_path}" ]]; then
-                info "${pkg_key} already built (${check_path} exists)"
-                return 0
+            if [[ -n "${check_path}" && -f "${LOCAL_PREFIX}/${check_path}" ]]; then
+                local all_found=true
+                local extra_count
+                extra_count="$(ycfg ".packages.${pkg_key}.skip_check.paths | length" 2>/dev/null || echo 0)"
+                if [[ "${extra_count}" -gt 0 ]]; then
+                    local j
+                    for j in $(seq 0 $(( extra_count - 1 ))); do
+                        local extra_path
+                        extra_path="$(ycfg ".packages.${pkg_key}.skip_check.paths[${j}]")"
+                        if [[ ! -f "${LOCAL_PREFIX}/${extra_path}" ]]; then
+                            all_found=false
+                            info "${pkg_key} skip check: ${extra_path} missing, will rebuild"
+                            break
+                        fi
+                    done
+                fi
+                if [[ "${all_found}" == "true" ]]; then
+                    info "${pkg_key} already built (${check_path} exists)"
+                    return 0
+                fi
             fi
             ;;
 
@@ -969,7 +998,7 @@ should_skip_step() {
             check_cmd="$(ycfg ".packages.${pkg_key}.skip_check.command")"
             check_workdir="$(ycfg ".packages.${pkg_key}.skip_check.workdir")"
             check_workdir="${check_workdir:-${VLLM_DIR}}"
-            check_workdir="$(eval echo "${check_workdir}")"
+            check_workdir="$(echo "${check_workdir}" | envsubst)"
             if (cd "${check_workdir}" && python -c "${check_cmd}") 2>/dev/null; then
                 local ver
                 ver="$(cd "${check_workdir}" && python -c "${check_cmd}" 2>/dev/null || true)"
@@ -1008,10 +1037,12 @@ should_skip_step() {
 # Runs validation commands from the YAML manifest's validation: array.
 # Each command is a shell expression evaluated with eval (supports ${VAR}).
 #
-# Usage: validate_pkg <pkg_key>
+# Usage: validate_pkg <pkg_key> [die|warn]
+# Default action on failure: warn. Pass "die" to abort on first failure.
 
 validate_pkg() {
     local pkg_key="$1"
+    local fail_action="${2:-warn}"
 
     local val_count
     val_count="$(ycfg ".packages.${pkg_key}.validation | length")"
@@ -1025,14 +1056,19 @@ validate_pkg() {
         cmd="$(ycfg ".packages.${pkg_key}.validation[${i}]")"
         [[ -n "${cmd}" ]] || continue
 
-        # Expand shell variables in the command
+        # Expand shell variables safely (K.11: use envsubst instead of eval
+        # to prevent arbitrary code execution from compromised YAML)
         local expanded_cmd
-        expanded_cmd="$(eval echo "${cmd}")"
+        expanded_cmd="$(echo "${cmd}" | envsubst)"
 
-        if eval "${expanded_cmd}" >/dev/null 2>&1; then
+        if bash -c "${expanded_cmd}" >/dev/null 2>&1; then
             success "  ${cmd}"
         else
-            warn "  FAILED: ${cmd}"
+            if [[ "${fail_action}" == "die" ]]; then
+                die "  CRITICAL FAILED: ${cmd}"
+            else
+                warn "  FAILED: ${cmd}"
+            fi
         fi
     done
 }
@@ -1081,8 +1117,8 @@ setup_build_env() {
         [[ -n "${key}" ]] || continue
         local val
         val="$(ycfg ".packages.${pkg_key}.environment.${key}")"
-        # Expand shell variables in value
-        val="$(eval echo "${val}")"
+        # Expand shell variables safely (K.11: envsubst instead of eval)
+        val="$(echo "${val}" | envsubst)"
         export "${key}=${val}"
     done
 }
@@ -1116,7 +1152,7 @@ generate_env_file() {
             local val
             val="$(ycfg "${yaml_path}.${key}")"
             if [[ "${val}" == *'{{ '*' }}'* ]]; then
-                val="$(echo "${val}" | sed -E 's/\{\{ (.+?) \}\}/$(eval "\1")/g')"
+                val="${val//\{\{ nproc \}\}/$(nproc)}"
             fi
             echo "${key}=${val}"
         done
@@ -1408,11 +1444,20 @@ configure_therock() {
 
     cd "${THEROCK_SRC}"
 
-    # Check if already configured
+    # Check if already configured (with commit verification)
+    local _therock_commit
+    _therock_commit="$(ycfg '.packages.therock.commit')"
     if [[ -f "build/build.ninja" ]]; then
-        info "TheRock already configured (build/build.ninja exists)"
-        cd "${VLLM_DIR}"
-        return
+        local _marker_commit
+        _marker_commit="$(cat "${THEROCK_SRC}/.therock-build-commit" 2>/dev/null || echo '')"
+        if [[ "${_marker_commit}" == "${_therock_commit}" ]]; then
+            info "TheRock already configured (build/build.ninja exists, commit ${_therock_commit})"
+            cd "${VLLM_DIR}"
+            return
+        else
+            warn "TheRock build.ninja exists but commit changed (${_marker_commit:-none} → ${_therock_commit}), reconfiguring"
+            rm -rf build
+        fi
     fi
 
     info "Configuring TheRock for gfx1151..."
@@ -1486,6 +1531,9 @@ configure_therock() {
     # Restore all flags from vllm-env.sh
     # shellcheck source=vllm-env.sh
     _vllm_source_env
+
+    # Write commit marker for idempotent skip detection
+    echo "${_therock_commit}" > "${THEROCK_SRC}/.therock-build-commit"
 
     cd "${VLLM_DIR}"
     success "TheRock configured"
@@ -1577,8 +1625,17 @@ validate_rocm() {
 
     info "ROCM_PATH: ${ROCM_PATH}"
 
-    # Run YAML-defined validation checks
-    validate_pkg therock
+    # Run YAML-defined validation checks (critical: die on failure)
+    validate_pkg therock die
+
+    # Enforce device nodes (warned in check_prerequisites, die here)
+    local device_nodes
+    mapfile -t device_nodes < <(ycfg '.prerequisites.device_nodes[]')
+    for node in "${device_nodes[@]}"; do
+        if [[ ! -e "${node}" ]]; then
+            die "${node} not found. GPU steps require kernel modules: $(ycfg '.platform.kernel_modules | join(", ")')"
+        fi
+    done
 
     # Check hipcc
     if [[ -x "${ROCM_PATH}/bin/hipcc" ]]; then
@@ -1970,7 +2027,7 @@ build_triton() {
 
     # Validate ROCm toolchain is available.
     if [[ -z "${ROCM_PATH:-}" || ! -d "${ROCM_PATH}/lib/llvm" ]]; then
-        die "ROCM_PATH is not set or ${ROCM_PATH:-<unset>}/lib/llvm does not exist. Run TheRock build first (steps 5-8)."
+        die "ROCM_PATH is not set or ${ROCM_PATH:-<unset>}/lib/llvm does not exist. Run TheRock build first (steps 1-4)."
     fi
 
     # Ensure vllm-env.sh flags are active
@@ -2711,6 +2768,16 @@ CONSTRAINTS_EOF
             die "No PyTorch wheel found in ${WHEELS_DIR} — run step 10 first"
         fi
 
+        # Also restore torchvision from its source-built wheel
+        local _tv_wheel
+        _tv_wheel="$(newest_wheel "${WHEELS_DIR}"/torchvision-*.whl)"
+        if [[ -n "${_tv_wheel}" ]]; then
+            uv pip install --force-reinstall --no-deps "${_tv_wheel}"
+            info "Source-built torchvision reinstalled from wheel"
+        else
+            warn "No torchvision wheel found in ${WHEELS_DIR} — run step 13 first"
+        fi
+
         _torch_hip="$(python -c 'import torch; print(torch.version.hip or "")' 2>/dev/null || true)"
         if [[ -z "${_torch_hip}" ]]; then
             die "Failed to reinstall source-built PyTorch — torch.version.hip is still None"
@@ -2771,6 +2838,9 @@ build_vllm() {
     else
         warn "AITER build failed. Falling back to Triton-only build..."
         unset VLLM_ROCM_USE_AITER
+
+        # Uninstall stale amd-aiter extensions from venv (K.4)
+        uv pip uninstall amd-aiter 2>/dev/null || true
 
         # Clean partial build artifacts
         python setup.py clean 2>/dev/null || true
@@ -4772,9 +4842,11 @@ clone_and_build_lemonade() {
         echo "${_backend_name}" > "${_backend_dir}/backend.txt"
     }
 
-    # Skip if llama-server already built (check for flattened binary)
-    if [[ -x "${LLAMACPP_ROCM_DIR}/llama-server" ]]; then
-        info "llama.cpp already built at ${LLAMACPP_ROCM_DIR}/llama-server"
+    # Skip only if ALL backends are built (per-backend check, A.13)
+    if [[ -x "${LLAMACPP_ROCM_DIR}/llama-server" \
+       && -x "${LLAMACPP_VULKAN_DIR}/llama-server" \
+       && -x "${LLAMACPP_CPU_DIR}/llama-server" ]]; then
+        info "All llama.cpp backends already built (ROCm+Vulkan+CPU)"
     else
         # 1. Reset source tree
         info "Resetting llama.cpp source tree..."
@@ -4858,8 +4930,10 @@ clone_and_build_lemonade() {
 install_lemonade_server() {
     log_step 34 "Build Lemonade Server from source"
 
-    # Clone/update source
-    clone_pkg lemonade "${LEMONADE_SRC}" "Lemonade Server"
+    # Source already cloned in Step 33 — skip re-clone (A.10)
+    if [[ ! -d "${LEMONADE_SRC}/.git" ]]; then
+        clone_pkg lemonade "${LEMONADE_SRC}" "Lemonade Server"
+    fi
 
     # Apply patches (e.g. backend_versions.json customization)
     apply_patches lemonade "${LEMONADE_SRC}"
@@ -4969,6 +5043,14 @@ handle_rebuild() {
         if [[ -d "${LOCAL_PREFIX}" ]]; then
             rm -rf "${LOCAL_PREFIX}"
             info "Removed ${LOCAL_PREFIX}"
+        fi
+
+        # Remove build markers and wheel cache
+        rm -f "${VLLM_DIR}/.pytorch-rebuilt-marker"
+        rm -f "${VLLM_DIR}/.aiter-status"
+        if [[ -d "${VLLM_DIR}/wheels" ]]; then
+            rm -rf "${VLLM_DIR}/wheels"
+            info "Removed ${VLLM_DIR}/wheels"
         fi
 
         success "Clean complete. Starting fresh build."

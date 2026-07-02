@@ -1140,14 +1140,14 @@ ${LOCAL_PREFIX}/lib:${LOCAL_PREFIX}/lib/llvm/lib:$ORIGIN/lib` on
 
 ### 75. torch version pin relaxation (vllm/28)
 
-**Symptom**: pip downloads PyTorch 2.10.0 from PyPI despite a custom
-source-built torch >= 2.10.0 already installed in the venv.
+**Symptom**: pip downloads PyTorch 2.11.0 from PyPI despite a custom
+source-built torch >= 2.11.0 already installed in the venv.
 
-**Root cause**: vLLM's `pyproject.toml` specifies `"torch == 2.10.0"`
+**Root cause**: vLLM's `pyproject.toml` specifies `"torch == 2.11.0"`
 as a build dependency. pip interprets the exact pin as requiring that
 version from PyPI.
 
-**Fix**: Change `"torch == 2.10.0"` to `"torch >= 2.10.0"` in
+**Fix**: Change `"torch == 2.11.0"` to `"torch >= 2.11.0"` in
 `pyproject.toml`.
 
 ### 76. Native ROCm PagedAttention for gfx1151 (vllm/29)
@@ -1204,7 +1204,7 @@ modules compile successfully.
 
 ### 79. GTT dynamic device detection (DISABLED)
 
-**File:** `/opt/src/vllm/patches/gtt-dynamic-device.patch`
+**File:** inline patch (sed/heredoc in `vllm-packages.yaml`) — never a separate `.patch` file
 **Status:** DISABLED — commented out in `vllm-packages.yaml`.
 
 **Symptom**: `cudaMalloc failed: out of memory` crashes on ROCm despite
@@ -1409,7 +1409,7 @@ created in FP32. Weight loading preserves FP32 via `copy_()`, and ViT
 outputs are seamlessly cast back to BF16 at the multimodal merge point
 (`_merge_multimodal_embeddings` casts to `input_dtype`).
 
-Patch file: `patches/qwen3vl-vit-fp32.patch`
+Patch: inline (sed/heredoc in `vllm-packages.yaml`) — never a separate `.patch` file
 
 **Verification**: Transformers direct test (Phase 1) confirmed BF16=NaN,
 FP16=NaN, FP32=OK. vLLM offline test (Phase 2) confirmed correct

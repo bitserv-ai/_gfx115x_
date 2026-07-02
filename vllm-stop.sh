@@ -59,8 +59,8 @@ stop_instance() {
         return 0
     fi
 
-    info "Sending SIGTERM to vLLM ${role} (PID ${pid})..."
-    kill -TERM "${pid}"
+    info "Sending SIGTERM to vLLM ${role} (PID ${pid}, process group)..."
+    kill -TERM -"${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
 
     # Wait for graceful shutdown.
     local waited=0
@@ -71,7 +71,7 @@ stop_instance() {
 
     if kill -0 "${pid}" 2>/dev/null; then
         warn "vLLM ${role} did not exit within ${SHUTDOWN_TIMEOUT}s. Sending SIGKILL."
-        kill -KILL "${pid}" 2>/dev/null || true
+        kill -KILL -"${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
         sleep 1
     fi
 

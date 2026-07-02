@@ -75,9 +75,9 @@ platform:
   gpu: "RDNA 3.5 iGPU, gfx1151, 40 CUs"
   gpu_arch: "gfx1151"
   hsa_gfx_version: "11.5.1"
-  memory: "64-128 GB unified LPDDR5X"
+  memory: "96 GB unified LPDDR5X (48 GB UMA + 48 GB System)"
   distro: "CachyOS (Arch-based, rolling)"
-  kernel: "7.0.0-rc3-2-cachyos-rc (linux-cachyos-rc)"
+  kernel: "7.0.0-rc7-3-cachyos-rc (linux-cachyos-rc)"
   kernel_min: "7.0"
   kernel_modules:
     - amdgpu
@@ -266,6 +266,10 @@ packages:
     skip_check:
       type: file_exists
       path: "lib/libamdhip64.so"
+      paths:
+        - "lib/libhipblas.so"
+        - "bin/hipcc"
+        - "lib/llvm/bin/amdclang"
     build_dependencies:
       - joblib
       - msgpack
@@ -1940,7 +1944,7 @@ packages:
     branch: "v10.8.1"
     commit: "020717643a9d41cd9b04bd7349c190921367cd5f"
     src_dir: "lemonade"
-    shallow: true
+    shallow: false
     method: cmake
     phase: I
     steps: [34]
