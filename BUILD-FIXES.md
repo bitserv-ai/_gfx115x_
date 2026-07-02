@@ -2990,3 +2990,139 @@ Usage:
 
 The flag is parsed in the argument-parsing loop alongside `--rebuild`
 and `--step`, and the value is displayed in `main()`'s startup info.
+
+### 143. vLLM triton_kernels import fails — Triton version mismatch
+
+**Symptom:** Every vLLM startup logs:
+```
+ERROR [config.py:29] Failed to import Triton kernels. Please make sure
+your triton version is compatible. Error: No module named
+'triton.language.target_info'
+```
+
+**Root cause:** vLLM's `third_party/triton_kernels` package (from
+`conch-triton-kernels==1.2.1`) imports `triton.language.target_info`,
+`triton.constexpr_function`, and `triton.tools.ragged_tma`. These modules
+were added to Triton upstream after our pinned `main_perf @ 0ec280cf`
+(Triton 3.0.0). The dependency chain is:
+
+1. `triton.language.target_info` — added in upstream commit `9be042ce3`
+2. `triton.constexpr_function` — requires `ConstexprFunction(JITCallable)`
+3. `triton.tools.ragged_tma` — requires `triton.tools.tensor_descriptor`
+
+Backporting all three is a deep rabbit hole — each module pulls in more
+internal Triton APIs. A no-op `constexpr_function` shim is **dangerous**
+because it breaks Triton JIT codegen (constexpr evaluation silently
+becomes runtime evaluation).
+
+**Fix:** None — non-fatal. vLLM catches the ImportError and falls back
+to `ROCM_ATTN`. The error message is cosmetic. Proper fix requires
+upgrading Triton to a post-3.0 commit that includes `target_info`.
+
+**Impact:** Models using `TRITON_ATTN` backend silently fall back to
+`ROCM_ATTN`. `ROCM_ATTN` is the safe default for gfx1151 (RDNA 3.5).
+
+### 144. AITER JIT pre-warm dominates build time
+
+**Symptom:** Step 29 (Pre-warm AITER JIT modules) takes ~1h42min on
+first run. `module_moe_ck2stages` alone takes ~55min.
+
+**Root cause:** AITER JIT-compiles HIP C++ kernels at install time.
+`module_moe_ck2stages` generates 200+ specialized MoE GEMM kernel
+variants (different tile sizes, data types, quantization modes).
+Each variant is a separate `.cuda.o` compilation.
+
+**Fix:** None — legitimate compilation. The JIT cache in
+`site-packages/aiter/jit/*.so` makes subsequent runs instant.
+Cache is invalidated when AITER is rebuilt (`uv pip install
+--force-reinstall` clears the package directory).
+
+**Impact:** First build after AITER rebuild: +1h42min. Incremental
+builds (AITER cached): instant.
+
+### 145. TunableOp ROCBLAS_VERSION validator warning
+
+**Symptom:** vLLM startup logs:
+```
+UserWarning: Failed validator: ROCBLAS_VERSION (Triggered internally
+at .../Tunable.cpp:446.)
+```
+
+**Root cause:** PyTorch's TunableOp validates the rocBLAS version
+string against cached tuning results. TheRock's source-built rocBLAS
+includes a git hash in the version string that changes per build,
+so the validator always fails on first run after a rocBLAS rebuild.
+
+**Fix:** None — expected behavior. TunableOp correctly discards stale
+tuning data and starts fresh. A new TunableOp CSV is generated on the
+first real inference session.
+
+### 146. 23k+ clang "argument unused" warnings from global CFLAGS
+
+**Symptom:** Build log contains 23,496 warnings:
+```
+clang++: warning: argument unused during compilation: '-famd-opt'
+clang++: warning: argument unused during compilation: '-mllvm -polly'
+```
+
+**Root cause:** `_BASE_CFLAGS` in `vllm-env.sh` sets optimization flags
+(`-famd-opt`, `-mllvm -polly`, `-mllvm -inline-threshold=600`, etc.)
+that are only meaningful for C/C++ compilation. These propagate to
+link steps and translation units where they don't apply (mbedTLS,
+googletest, llama.cpp, Lemonade). The previous flag
+`-Wno-error=unused-command-line-argument` only prevented them from
+becoming fatal errors — the warnings were still printed.
+
+**Fix:** Changed `-Wno-error=unused-command-line-argument` to
+`-Wno-unused-command-line-argument` in both `vllm-env.sh` (_BASE_CFLAGS)
+and `build-vllm.sh` (CPython build CFLAGS/CXXFLAGS). Suppresses all
+23,496 cosmetic warnings, making real warnings visible in build log.
+
+### 147. setuptools version conflict — vLLM/torch pins vs latest setuptools
+
+**Symptom:** pip's dependency resolver logs 4 ERROR entries:
+```
+vllm 0.24.1.dev0 requires setuptools<80.0.0,>=77.0.3, but you have 82.0.1
+torch 2.11.0 requires setuptools<82, but you have 82.0.1
+```
+
+**Root cause:** `vllm-packages.yaml` `packages.venv.build_dependencies`
+listed `setuptools` without version constraint. Latest setuptools (82.0.1)
+was installed, violating vLLM's `<80` and torch's `<82` upper bounds.
+
+**Fix:** Pinned `setuptools<80` in YAML. This satisfies both vLLM (`<80`)
+and torch (`<82`) constraints.
+
+### 148. Smoke-test provenance heuristic false-positives for source-built wheels
+
+**Symptom:** Smoke test preflight warns:
+```
+PyTorch: WARNING — may not be from source build
+Triton: WARNING — may not be from source build
+```
+Despite both being source-built (`torch-2.11.0+git9df77ad`,
+`triton-3.0.0+git0ec280cf`).
+
+**Root cause:** The provenance check in `smoke_test()` (line ~3803) tested
+`'/opt/src/vllm/pytorch/' in torch.__file__`. But `torch.__file__` points
+to the venv (`/opt/src/vllm/.venv/lib/.../torch/__init__.py`), not the
+source tree. The check always failed for installed wheels.
+
+**Fix:** Added fallback check: `'+git' in torch.__version__`. Source-built
+wheels include a `+git<sha>` suffix in the version string. PyPI wheels
+do not.
+
+### 149. AOTriton Triton-overlay wheel fails 7× due to LLVM_ENABLE_WERROR
+
+**Symptom:** AOTriton's `pip install .` calls Triton's `setup.py` which
+runs cmake with `-DLLVM_ENABLE_WERROR=ON`. The NVWS tablegen headers
+(`Passes.h.inc`, `.h.inc`) are never generated in the AOTriton context,
+producing 7 build failures before the AOTriton v2 C++ build path takes over.
+
+**Root cause:** Triton's CMakeLists.txt enables `-Werror` by default.
+AOTriton's Triton overlay build doesn't generate all NVWS dialect headers,
+so missing-include warnings become hard errors.
+
+**Fix:** Added `-DLLVM_ENABLE_WERROR=OFF` to `TRITON_APPEND_CMAKE_ARGS`
+in `build_aotriton()`. This is passed through by `setup.py` to the cmake
+invocation. Eliminates 7 guaranteed failures per cold run.

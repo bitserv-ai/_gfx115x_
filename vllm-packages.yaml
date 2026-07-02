@@ -806,7 +806,7 @@ packages:
       - ninja
       - cmake
       - wheel
-      - setuptools
+      - "setuptools<80"
       - "CppHeaderParser==2.7.4"
       - meson
       - PyYAML

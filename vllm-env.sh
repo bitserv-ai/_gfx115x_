@@ -131,10 +131,11 @@ fi
 #   -mllvm -inline-threshold=600: Aggressive inlining for Zen 5's wide issue pipeline
 #   -mllvm -unroll-threshold=150: Aggressive unrolling for Zen 5's large reorder buffer
 #   -mllvm -adce-remove-loops: Clean up dead loop structures in AI/scientific code
-#   -Wno-error=unused-command-line-argument: Prevent -famd-opt and -mllvm flags from
-#                             becoming fatal errors when passed through to link steps
-#                             or translation units where they don't apply (e.g. googletest)
-_BASE_CFLAGS="-O3 -DNDEBUG -march=native -flto=thin -mprefer-vector-width=512 -mavx512f -mavx512dq -mavx512vl -mavx512bw ${_AMD_OPT} ${_POLLY_FLAGS} -mllvm -inline-threshold=600 -mllvm -unroll-threshold=150 -mllvm -adce-remove-loops -Wno-error=unused-command-line-argument"
+#   -Wno-unused-command-line-argument: Suppress 23k+ warnings from -famd-opt and
+#                             -mllvm flags passed through to link steps or translation
+#                             units where they don't apply (e.g. googletest, mbedTLS).
+#                             Previously -Wno-error=... (non-fatal but still printed).
+_BASE_CFLAGS="-O3 -DNDEBUG -march=native -flto=thin -mprefer-vector-width=512 -mavx512f -mavx512dq -mavx512vl -mavx512bw ${_AMD_OPT} ${_POLLY_FLAGS} -mllvm -inline-threshold=600 -mllvm -unroll-threshold=150 -mllvm -adce-remove-loops -Wno-unused-command-line-argument"
 _BASE_LDFLAGS="-flto=thin -fuse-ld=lld -Wl,-rpath,${_LOCAL_PREFIX}/lib ${_AOCL_LDFLAGS}"
 
 # Autotools / setup.py: read CFLAGS, CXXFLAGS, LDFLAGS from environment.

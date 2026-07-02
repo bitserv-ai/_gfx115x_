@@ -124,6 +124,22 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
   `vllm-packages.yaml` backend_versions.json sed patch updated:
   Marker `"vulkan": "b8"`→`"vulkan": "b9747"`, sed `rocm`→`rocm-stable`+
   `rocm-nightly` (v10.8.1 has two ROCm channels).
+- **Audit fixes Phase 1–3** (commit `b858938`): 24 items across
+  runtime bugs, pipeline hardening, and documentation drift:
+  - Phase 1 (Quick Wins): `{{ nproc }}` template bug, TRUST_REMOTE_CODE
+    boolean parsing, dead patch paths, step count, version pins.
+  - Phase 2 (Runtime): Kill process on health-check timeout, kill
+    process group in vllm-stop.sh, health-check on 127.0.0.1, rebuild
+    cleanup, `/dev/kfd` check moved to validate_rocm, torchvision
+    restore, `.pytorch-rebuilt-marker` trap EXIT, amd-aiter uninstall.
+  - Phase 3 (Pipeline): Multi-lib skip check, `validate_pkg die` mode,
+    TheRock commit marker, lemonade clone dedup, lemonade `shallow:
+    false`, llama.cpp multi-backend skip, tee limitation documented,
+    `eval` → `envsubst` (security).
+- **AITER JIT pre-warm timing documented** (BUILD-FIXES #144):
+  `module_moe_ck2stages` generates 200+ kernel variants (~55min).
+  Total pre-warm ~1h42min on first run. Cached on subsequent runs
+  unless AITER is rebuilt.
 
 ### Fixed
 
@@ -191,6 +207,26 @@ skipped Atomic TurboQuant (eval only) and parametrized build functions (our
 - **`pipeline_model_parallel_size` → `pipeline_parallel_size`**
   (BUILD-FIXES #140): v0.24.0 renamed the `ParallelConfig` attribute.
   Updated `skip-distributed-single-gpu.patch` to use the new name.
+- **Triton `target_info` version mismatch** (BUILD-FIXES #143):
+  vLLM's `triton_kernels` package imports `triton.language.target_info`,
+  which doesn't exist in our Triton 3.0.0 (`main_perf`). Non-fatal —
+  vLLM falls back to `ROCM_ATTN`. Requires Triton upgrade for full fix.
+- **TunableOp ROCBLAS_VERSION validator** (BUILD-FIXES #145):
+  TheRock source-built rocBLAS includes a git hash that fails
+  TunableOp's version validator. Expected behavior — stale tuning
+  data is correctly discarded.
+- **23k+ clang "argument unused" warnings suppressed** (BUILD-FIXES #146):
+  `-Wno-error=unused-command-line-argument` → `-Wno-unused-command-line-argument`
+  in `vllm-env.sh` and `build-vllm.sh`. Eliminates 23,496 cosmetic warnings
+  from global CFLAGS propagating to link steps.
+- **setuptools version conflict** (BUILD-FIXES #147): Pinned `setuptools<80`
+  in `vllm-packages.yaml` — latest 82.0.1 violated vLLM `<80` and torch `<82`.
+- **Smoke-test provenance false-positive** (BUILD-FIXES #148): Source-built
+  wheels (`+git<sha>` suffix) were flagged "may not be from source build"
+  because `__file__` path check only matched source tree, not venv install.
+- **AOTriton LLVM WERROR failures** (BUILD-FIXES #149): Added
+  `-DLLVM_ENABLE_WERROR=OFF` to `TRITON_APPEND_CMAKE_ARGS` — eliminates 7
+  guaranteed build failures from missing NVWS tablegen headers.
 
 ## [0.4.0] - 2026-06-29
 

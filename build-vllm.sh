@@ -1345,8 +1345,8 @@ build_python() {
         --with-ensurepip=upgrade \
         CC="${amdclang}" \
         CXX="${amdclangxx}" \
-        CFLAGS="-O3 -march=native -famd-opt -Wno-error=unused-command-line-argument -fPIC" \
-        CXXFLAGS="-O3 -march=native -famd-opt -Wno-error=unused-command-line-argument -fPIC" \
+        CFLAGS="-O3 -march=native -famd-opt -Wno-unused-command-line-argument -fPIC" \
+        CXXFLAGS="-O3 -march=native -famd-opt -Wno-unused-command-line-argument -fPIC" \
         LDFLAGS="-flto=thin -fuse-ld=lld -Wl,-rpath,${LOCAL_PREFIX}/lib"
 
     info "Building Python ${CPYTHON_VERSION} (PGO training + final build)..."
@@ -2165,10 +2165,14 @@ build_aotriton() {
         sed -i 's/add_dependencies(TritonNVIDIA TritonNVIDIAGSanRuntime)/# Disabled on ROCm: add_dependencies(TritonNVIDIA TritonNVIDIAGSanRuntime)/' "${_nvidia_cmake}"
     fi
 
-    # Reduce build scope: skip unit tests (saves googletest download + compile).
+    # Reduce build scope: skip unit tests and disable LLVM werror.
     # TRITON_APPEND_CMAKE_ARGS is read by setup.py and appended to the cmake
     # invocation. This does not affect the AOTriton cmake build itself.
-    export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF"
+    # -DTRITON_BUILD_UT=OFF: skip googletest download + compile.
+    # -DLLVM_ENABLE_WERROR=OFF: AOTriton's Triton overlay build fails 7× because
+    #   NVWS tablegen headers are never generated; -Werror turns warnings into
+    #   errors. Disabling WERROR avoids guaranteed failures (N7).
+    export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF -DLLVM_ENABLE_WERROR=OFF"
 
     # Apply patches from YAML (remove stray rebase 'pick' line)
     apply_patches aotriton "${AOTRITON_SRC}"
@@ -3800,10 +3804,11 @@ else:
 import torch
 loc = torch.__file__
 print(f'  PyTorch location: {loc}')
-if '/opt/src/vllm/pytorch/' in loc:
-    print('  PyTorch: BUILT FROM SOURCE (ROCm fork)')
+ver = torch.__version__
+if '/opt/src/vllm/pytorch/' in loc or '+git' in ver:
+    print(f'  PyTorch: BUILT FROM SOURCE (ROCm fork, {ver})')
 else:
-    print(f'  PyTorch: WARNING — may not be from source build')
+    print(f'  PyTorch: WARNING — may not be from source build ({ver})')
 "
 
     # Check Triton
@@ -3811,10 +3816,11 @@ else:
 import triton
 loc = triton.__file__
 print(f'  Triton location: {loc}')
-if '/opt/src/vllm/triton/' in loc:
-    print('  Triton: BUILT FROM SOURCE (ROCm fork)')
+ver = triton.__version__
+if '/opt/src/vllm/triton/' in loc or '+git' in ver:
+    print(f'  Triton: BUILT FROM SOURCE (ROCm fork, {ver})')
 else:
-    print(f'  Triton: WARNING — may not be from source build')
+    print(f'  Triton: WARNING — may not be from source build ({ver})')
 "
 
     # Check Flash Attention
@@ -3873,6 +3879,11 @@ except ImportError as e:
 # In a CK-free build (no Composable Kernel sources), 56 of 72 modules are
 # auto-excluded, leaving 26 buildable. Of those, only 2 ship pre-built
 # (module_aiter_enum, module_attention_asm). This step compiles the rest.
+#
+# Timing: module_moe_ck2stages alone takes ~55min (200+ kernel variants).
+# Total pre-warm is ~1h42min on first run. JIT cache makes subsequent runs
+# instant — UNLESS AITER is rebuilt (uv pip install --force-reinstall clears
+# the .so cache in site-packages/aiter/jit/).
 #
 # ~6 modules will fail due to gfx1151 hardware ISA incompatibilities:
 #   - module_quick_all_reduce: requires fp8-conversion-insts (gfx9 only)
@@ -3973,7 +3984,7 @@ warmup_aiter_jit() {
     # module_mha_varlen_bwd alone take ~70 min each to compile before failing).
     local skip_list
     skip_list="$(ycfg '.packages.aiter.jit_skip_modules[]' 2>/dev/null | paste -sd',' || true)"
-    info "Skipping ${skip_list:+$(echo "${skip_list}" | tr ',' '\n' | wc -l)} CDNA-only modules"
+    info "Skipping ${skip_list:+$(echo "${skip_list}" | tr ',' '\n' | wc -l)} CDNA-only modules (YAML entries; some may not exist in AITER ops list)"
 
     # Run from a temp directory — AITER's ninja build leaks a stray HIP CU ID
     # object file (-.o) into the working directory. Using a temp dir prevents
