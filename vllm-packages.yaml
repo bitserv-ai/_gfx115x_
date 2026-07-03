@@ -279,10 +279,6 @@ packages:
       - pytest
       - mako
       - zstandard
-      # pytest: TheRock's CMake FetchContent may pull pytest even with
-      # BUILD_TESTING=OFF (e.g. via hipBLASLt's test harness or rocm-cmake
-      # validation). Keeping it avoids potential find_package failures.
-      - pytest
     notes: |
       TheRock MUST be built with GCC -- rocprofiler-systems has an explicit
       GNU compiler check that blocks Clang. TheRock produces amdclang (AMD's
