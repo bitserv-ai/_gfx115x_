@@ -25,11 +25,11 @@
 #   - ~100GB disk space for build artifacts
 #
 # Usage:
-#   scripts/build-vllm.sh             # Full build (idempotent)
-#   scripts/build-vllm.sh --rebuild   # Force rebuild (clean + build)
-#   scripts/build-vllm.sh --step N    # Run from step N onward
+#   ./build-vllm.sh             # Full build (idempotent)
+#   ./build-vllm.sh --rebuild   # Force rebuild (clean + build)
+#   ./build-vllm.sh --step N    # Run from step N onward
 #
-# Build pipeline (35 steps):
+# Build pipeline (36 steps):
 #   Phase A: ROCm SDK (TheRock — builds amdclang used by everything downstream)
 #     1. Clone TheRock          3. Build TheRock
 #     2. Configure TheRock      4. Validate ROCm
@@ -61,9 +61,7 @@
 #    27. Patch Flash Attention
 #
 #   Phase G: Validation + Warmup
-#    29. Smoke test
-#    29b. AITER JIT pre-warm (compile all buildable modules ahead of time)
-#    29c. TunableOp warmup (populate GEMM autotuning CSV)
+#    29. Smoke test + AITER JIT pre-warm
 #
 #   Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
 #    30. Build Rust wheels      (orjson, cryptography — AVX-512 + VAES)
@@ -72,8 +70,9 @@
 #
 #   Phase I: Lemonade Inference Server (llama.cpp + FLM + ONNX)
 #    33. Clone Lemonade + build llama.cpp with hipBLAS for gfx1151
-    #    34. Build Lemonade Server from source
+#    34. Build Lemonade Server from source
 #    35. Validate Lemonade (server smoke test)
+#    36. Backend smoke test (TunableOp warmup + llama.cpp backends)
 
 set -euo pipefail
 
@@ -168,7 +167,13 @@ source "${_SCRIPT_DIR}/vllm-env.sh"
 # Copy patch files from repo into ${VLLM_DIR}/patches/ so apply_patches()
 # can reference them via ${VLLM_DIR}/patches/<name>.patch in the YAML.
 mkdir -p "${VLLM_DIR}/patches"
-cp "${_SCRIPT_DIR}"/patches/*.patch "${VLLM_DIR}/patches/"
+shopt -s nullglob
+_patch_files=("${_SCRIPT_DIR}"/patches/*.patch)
+shopt -u nullglob
+if [[ ${#_patch_files[@]} -gt 0 ]]; then
+    cp "${_patch_files[@]}" "${VLLM_DIR}/patches/"
+fi
+unset _patch_files
 
 # Re-source vllm-env.sh to restore compiler flags after steps that unset them
 # (e.g., Python build unsets CFLAGS/LDFLAGS to avoid -lalm contamination,
@@ -225,7 +230,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --step)
+            if [[ $# -lt 2 ]]; then
+                die "--step requires a step number (1-${TOTAL_STEPS:-36})"
+            fi
             START_STEP="$2"
+            if ! [[ "${START_STEP}" =~ ^[0-9]+$ ]] \
+                || [[ "${START_STEP}" -lt 1 ]] \
+                || [[ "${START_STEP}" -gt "${TOTAL_STEPS:-36}" ]]; then
+                die "Invalid --step ${START_STEP}; must be an integer from 1 to ${TOTAL_STEPS:-36}"
+            fi
             shift 2
             ;;
         *)
@@ -508,7 +521,9 @@ install_tools_to_venv() {
     # uv: pip-installable (provides the uv binary in the venv)
     if [[ ! -x "${venv_bin}/uv" ]]; then
         info "Installing uv into venv..."
-        pip install uv -q
+        local uv_version
+        uv_version="$(ycfg '.build.bootstrap.uv.version')"
+        pip install "uv==${uv_version}" -q
     fi
 
     # yq: standalone Go binary — copy from bootstrap location or system
@@ -1098,7 +1113,9 @@ generate_env_file() {
             [[ -n "${key}" ]] || continue
             local val
             val="$(ycfg "${yaml_path}.${key}")"
-            if [[ "${val}" == *'{{ '*' }}'* ]]; then
+            if [[ "${val}" == *'{{ nproc }}'* ]]; then
+                val="${val//\{\{ nproc \}\}/$(nproc)}"
+            elif [[ "${val}" == *'{{ '*' }}'* ]]; then
                 val="$(echo "${val}" | sed -E 's/\{\{ (.+?) \}\}/$(eval "\1")/g')"
             fi
             echo "${key}=${val}"
@@ -3629,7 +3646,7 @@ except ImportError as e:
     echo ""
     info "Full inference stack build complete!"
     info "  Install directory: ${VLLM_DIR}"
-    info "  Activate with: source scripts/vllm-env.sh"
+    info "  Activate with: source ./vllm-env.sh"
     info "  AITER: ${aiter_status}"
     info "  Components: AOCL-LibM + Python + TheRock + PyTorch + Triton + AOTriton + vLLM + Flash Attention"
     info "  Wheels dir: ${WHEELS_DIR}"
@@ -3900,7 +3917,7 @@ print(path)
         info "vLLM: SKIP (SMOKE_SKIP_VLLM set)"
     else
 
-    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx11510.csv"
+    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx1151.csv"
     info "TunableOp CSV: ${tunableop_csv}"
 
     if python -c "
