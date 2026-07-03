@@ -24,7 +24,7 @@ Adopted RUNPATH fix and runtime feature merge.
 - **`MAX_NUM_BATCHED_TOKENS` per-role config** (`vllm-start.sh`).
 - **Build skip markers** (BUILD-FIXES #141): vLLM/AITER/FA
   `should_skip_step()` + AITER JIT cache-intact fast path.
-- **16 new `.patch` files** (total now 23).
+- **16 new `.patch` files** (total now 24).
 
 ### Changed
 
@@ -33,7 +33,7 @@ Adopted RUNPATH fix and runtime feature merge.
   Lemonade v10.8.1, +7 others). Lemonade config migration v1→v2.
 - **Patch refactor**: 15 broken sed → 5 new git patches; 8 obsolete
   patches removed after upstream changes. `clean_generated: true`
-  added. 36→23 patches.
+  added. 36→24 patches.
 - **Build optimization**: 8 TheRock sub-projects disabled (~30-45 min),
   AITER JIT parallelized (ThreadPoolExecutor, ~5-8× speedup),
   `eval`→`envsubst`, clone dedup, multi-backend skip.
