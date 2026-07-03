@@ -1331,9 +1331,8 @@ core count.
 **Root cause**: Template variable `{{ nproc }}` is not recognized by the
 shell-based substitution logic in `generate_env_file()`.
 
-**Fix**: Shell-template interpolation in `generate_env_file()`: values matching
-`{{ cmd }}` are evaluated via `eval` at generation time. `nproc` is the only
-current use; the pattern supports arbitrary shell commands.
+**Fix**: `generate_env_file()` substitutes `{{ nproc }}` with `$(nproc)` at
+generation time via bash parameter expansion.
 
 ### 87. Smoke test robustness and diagnostics (Dillflix cherry-pick)
 
