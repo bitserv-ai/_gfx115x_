@@ -313,10 +313,10 @@ packages:
           which elfutils has in multiple call sites.
 
       # 3-4. OBSOLETE — yaml-cpp and elfio OLD paths under external/rocprofiler-sdk/
-      # no longer exist in current TheRock source tree. Superseded by patches #16/#17
+      # no longer exist in current TheRock source tree. Superseded by patches #13/#14
       # (new path under rocm-systems/projects/rocprofiler-sdk/).
 
-      # 5. Copy MLIR object libraries to install tree
+      # 3. Copy MLIR object libraries to install tree
       - type: file_copy
         src: "${THEROCK_SRC}/build/compiler/amd-llvm/stage/lib/llvm/lib/objects-Release"
         dst: "${LOCAL_PREFIX}/lib/llvm/lib/objects-Release"
@@ -327,7 +327,7 @@ packages:
           directory that MLIR's cmake exports reference. Needed by Triton
           when linking MLIR statically via LLVM_SYSPATH.
 
-      # 6. Install FileCheck binary for downstream consumers
+      # 4. Install FileCheck binary for downstream consumers
       - type: file_copy
         src: "${THEROCK_SRC}/build/compiler/amd-llvm/build/bin/FileCheck"
         dst: "${LOCAL_PREFIX}/lib/llvm/bin/FileCheck"
@@ -337,7 +337,7 @@ packages:
           cmake which unconditionally copies it into the wheel. TheRock
           builds it but doesn't install it when THEROCK_BUILD_TESTING=OFF.
 
-      # 7. Skip roctx64 patch hooks when profiler stack is disabled (BUILD-FIXES #105)
+      # 5. Skip roctx64 patch hooks when profiler stack is disabled (BUILD-FIXES #105)
       # Replaces old #56/#57 (hard-wired roctx64 paths) with proper gating.
       - type: sed
         file: comm-libs/pre_hook_rccl.cmake
@@ -369,7 +369,7 @@ packages:
         marker_absent: true
         sed_command: 's|if(NOT WIN32)|if(NOT WIN32 AND THEROCK_ENABLE_PROFILER)|'
 
-      # 8. Disable RCCL ROCTX tracing when profiler stack is disabled (BUILD-FIXES #106)
+      # 6. Disable RCCL ROCTX tracing when profiler stack is disabled (BUILD-FIXES #106)
       - type: sed
         file: comm-libs/CMakeLists.txt
         description: >-
@@ -381,7 +381,7 @@ packages:
         marker_absent: true
         sed_command: '/-DENABLE_MSCCL_KERNEL=OFF/a\      -DROCTX=OFF'
 
-      # 9. Restore RCCL tuner macro definitions before rccl_common.h uses them (BUILD-FIXES #107)
+      # 7. Restore RCCL tuner macro definitions before rccl_common.h uses them (BUILD-FIXES #107)
       - type: sed
         file: rocm-systems/projects/rccl/src/include/rccl_common.h
         description: >-
@@ -396,7 +396,7 @@ packages:
           /#include "nccl.h"/a\
           #include "plugin\/nccl_tuner.h"
 
-      # 10. Make RCCL's NVTX header honor stub-only build (BUILD-FIXES #108)
+      # 8. Make RCCL's NVTX header honor stub-only build (BUILD-FIXES #108)
       - type: sed
         file: rocm-systems/projects/rccl/src/include/nvtx.h
         description: >-
@@ -437,7 +437,7 @@ packages:
           /#define NVTX3_RANGE_ADD_PAYLOAD(N, S, P)/a\
           #define NCCL_NVTX3_FUNC_RANGE
 
-      # 11. Disable hipBLASLt/hipSPARSELt/MIOpen ROCTX markers when profiler disabled (BUILD-FIXES #109)
+      # 9. Disable hipBLASLt/hipSPARSELt/MIOpen ROCTX markers when profiler disabled (BUILD-FIXES #109)
       - type: sed
         file: math-libs/BLAS/CMakeLists.txt
         description: >-
@@ -472,16 +472,7 @@ packages:
         marker_absent: true
         sed_command: '/-DMIOPEN_USE_COMPOSABLEKERNEL=/a\      -DMIOPEN_USE_ROCTRACER=OFF'
 
-      # 14. MIOpen ciso646 #warning with GCC 15 + C++20 (BUILD-FIXES #119)
-      - type: patch
-        path: "${VLLM_DIR}/patches/miopen-ciso646-warnings.patch"
-        description: >-
-          GCC 15's ciso646 header emits a #warning ("ciso646 is not a
-          standard header since C++20") which becomes a hard error under
-          MIOpen's -Werror. Add -Wno-#warnings to Clang-specific compile
-          options in EnableCompilerWarnings.cmake.
-
-      # 12. Disable rocBLAS ROCTX integration when profiler stack is disabled (BUILD-FIXES #110)
+      # 10. Disable rocBLAS ROCTX integration when profiler stack is disabled (BUILD-FIXES #110)
       - type: sed
         file: math-libs/BLAS/CMakeLists.txt
         description: >-
@@ -493,20 +484,7 @@ packages:
         marker_absent: true
         sed_command: '0,/-DLINK_BLIS=OFF/s//-DLINK_BLIS=OFF\n    -DROCTX=OFF/'
 
-      # 11+12. rocBLAS ROCTX gating (BUILD-FIXES #110) — migrated from sed to patch
-      - type: patch
-        path: "${VLLM_DIR}/patches/rocblas-roctx-gating.patch"
-        description: >-
-          Gate rocBLAS's shared-library ROCTX header/library probing on the
-          ROCTX cache option. Upstream probes roctracer/roctx.h whenever
-          BUILD_SHARED_LIBS is on, so TheRock still fails even when
-          -DROCTX=OFF was injected at the super-project layer. Also adds
-          DISABLE_ROCTX compile definition when ROCTX is off, keeping
-          logging.cpp from including roctracer/roctx.h. Migrated from two
-          sed entries to a single .patch file because the sed append
-          command inserted literal \n instead of real newlines.
-
-      # 13. Disable rocSPARSE BUILD_WITH_ROCTX when profiler stack is disabled (BUILD-FIXES #111)
+      # 11. Disable rocSPARSE BUILD_WITH_ROCTX when profiler stack is disabled (BUILD-FIXES #111)
       - type: sed
         file: math-libs/BLAS/CMakeLists.txt
         description: >-
@@ -519,19 +497,7 @@ packages:
         marker_absent: true
         sed_command: '0,/-DBUILD_CLIENTS_SAMPLES=OFF/s//-DBUILD_CLIENTS_SAMPLES=OFF\n    -DBUILD_WITH_ROCTX=OFF/'
 
-      # 14. ROCR-Runtime OpenCL blit kernels need explicit ROCm device-lib path (BUILD-FIXES #112)
-      - type: patch
-        path: "${VLLM_DIR}/patches/rocr-blit-device-libs.patch"
-        description: >-
-          Migrated from inline sed to .patch: use find_package(AMDDeviceLibs)
-          to resolve the bitcode directory via TheRock's dep-provider system.
-          The previous sed searched CMAKE_PREFIX_PATH/llvm/amdgcn/bitcode which
-          does not exist in TheRock's build tree (CMAKE_PREFIX_PATH only holds
-          CMake trampoline configs, not libraries). The patch adds a proper
-          find_package(AMDDeviceLibs QUIET CONFIG) call and resolves
-          AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode as the device-lib path.
-
-      # 15. Disable atomic_codegen tests in libhipcxx to prevent build failures
+      # 12. Disable atomic_codegen tests in libhipcxx to prevent build failures
       - type: sed
         file: math-libs/libhipcxx/test/atomic_codegen/CMakeLists.txt
         description: >-
@@ -543,7 +509,7 @@ packages:
         marker_absent: true
         sed_command: s/atomics_tests/# atomics_tests disabled/
 
-      # 16. Add missing <cstdint> include to yaml-cpp emitterutils.cpp (rocprofiler-sdk)
+      # 13. Add missing <cstdint> include to yaml-cpp emitterutils.cpp (rocprofiler-sdk)
       - type: sed
         file: rocm-systems/projects/rocprofiler-sdk/external/yaml-cpp/src/emitterutils.cpp
         description: >-
@@ -556,7 +522,7 @@ packages:
         marker_absent: true
         sed_command: '/#include <sstream>/a #include <cstdint>'
 
-      # 17. Add missing <cstdint> include to elfio elf_types.hpp (rocprofiler-sdk)
+      # 14. Add missing <cstdint> include to elfio elf_types.hpp (rocprofiler-sdk)
       - type: sed
         file: rocm-systems/projects/rocprofiler-sdk/external/elfio/elfio/elf_types.hpp
         description: >-
@@ -569,7 +535,7 @@ packages:
         marker_absent: true
         sed_command: '/#define ELFTYPES_H/i #include <cstdint>'
 
-      # 18. Guard primlibs benchmark deps find_package(amd_smi) with BUILD_BENCHMARK (BUILD-FIXES #114)
+      # 15. Guard primlibs benchmark deps find_package(amd_smi) with BUILD_BENCHMARK (BUILD-FIXES #114)
       - type: patch
         path: "${VLLM_DIR}/patches/therock-primlibs-benchmark-deps.patch"
         description: >-
@@ -582,7 +548,7 @@ packages:
           dynamic linking"). Skipping the find_package when benchmarks are
           disabled avoids the premature call entirely.
 
-      # 19. Add rocdecode/rocjpeg as RUNTIME_DEPS for rocprofiler-sdk (BUILD-FIXES #115)
+      # 16. Add rocdecode/rocjpeg as RUNTIME_DEPS for rocprofiler-sdk (BUILD-FIXES #115)
       - type: patch
         path: "${VLLM_DIR}/patches/rocprofiler-sdk-rocdecode-deps.patch"
         description: >-
@@ -595,12 +561,12 @@ packages:
           include dir). The dep-provider then finds the broken config file,
           causing a FATAL_ERROR during rocprofiler-sdk configure.
 
-      # 20. Move media-libs before profiler in add_subdirectory order (BUILD-FIXES #115)
+      # 17. Move media-libs before profiler in add_subdirectory order (BUILD-FIXES #115)
       - type: patch
         path: "${VLLM_DIR}/patches/therock-media-libs-before-profiler.patch"
         description: >-
           Move add_subdirectory(media-libs) before add_subdirectory(profiler)
-          in TheRock's root CMakeLists.txt. Patch #19 adds rocdecode/rocjpeg as
+          in TheRock's root CMakeLists.txt. Patch #16 adds rocdecode/rocjpeg as
           RUNTIME_DEPS to rocprofiler-sdk, but therock_cmake_subproject_declare
           calls _therock_assert_is_cmake_subproject which does get_target_property
           on each dep — the targets must already exist. Since rocdecode/rocjpeg
@@ -609,22 +575,7 @@ packages:
           third-party/sysdeps (all processed before both), so this reordering
           is safe.
 
-      # 21. rccl missing <iostream>/<map>/<string> for std::cerr/std::map/std::string (BUILD-FIXES #116)
-      - type: patch
-        path: "${VLLM_DIR}/patches/rccl-iostream-include.patch"
-        description: >-
-          rccl's ipc_init.cu defines a HIP_CALL macro that uses std::cerr
-          without including <iostream>. net.cc uses std::map and
-          std::string without including <map>/<string>. Modern compilers
-          (GCC 15+, Clang 21+) removed transitive includes. The patch adds
-          source-level #include directives to ipc_init.cu and net.cc.
-          Previous approach used target_compile_options(-include ...) in
-          CMakeLists.txt, but CMake de-duplicates multiple -include flags
-          into a single -include with space-separated args, which clang
-          interprets as input filenames. Source-level #include avoids
-          this CMake flag-merging issue and is incremental-safe.
-
-      # 22. dep-provider: NO_CMAKE_PACKAGE_REGISTRY (BUILD-FIXES #118)
+      # 18. dep-provider: NO_CMAKE_PACKAGE_REGISTRY (BUILD-FIXES #118)
       - type: patch
         path: "${VLLM_DIR}/patches/therock-dep-provider-no-registry.patch"
         description: >-
@@ -1896,8 +1847,8 @@ packages:
 
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
-    branch: "v10.8.1"
-    commit: "020717643a9d41cd9b04bd7349c190921367cd5f"
+    branch: "v10.9.0"
+    commit: "af311e1ac19e974ce0f0ea0bec27be195adc69e7"
     src_dir: "lemonade"
     shallow: false
     method: cmake
@@ -1914,7 +1865,7 @@ packages:
         sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm-stable": "[^"]*"/"rocm-stable": ""/; /"llamacpp"/,/}/ s/"rocm-nightly": "[^"]*"/"rocm-nightly": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
     notes: |
       Lemonade inference server built from source (CMake + Ninja) on branch
-      v10.8.1 at pinned commit. Produces lemond (daemon) + lemonade (CLI)
+      v10.9.0 at pinned commit. Produces lemond (daemon) + lemonade (CLI)
       + web app (React, BUILD_WEB_APP=ON, Node.js required).
 
       AUR package (lemonade-server) kept installed for systemd unit template,

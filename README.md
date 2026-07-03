@@ -132,10 +132,11 @@ prerequisite checks and install hints accordingly.
 | **Ubuntu** | Ubuntu, Debian, Linux Mint, Pop!_OS, Elementary, Zorin | apt |
 | **Fedora** | Fedora, Nobara, RHEL, CentOS, Rocky, Alma | dnf |
 
-`uv` and `yq` are **auto-bootstrapped** if not found on PATH. The script
-tries `go install` first (always gets latest), then falls back to
-downloading the latest release binary from GitHub. Both tools are also
-installed into the venv for self-contained builds.
+`uv` and `yq` are **auto-bootstrapped** if not found on PATH. The
+script tries `go install` first (always gets latest), then falls back to
+downloading a release binary from GitHub. `uv` is pinned to a specific
+version (`0.7.12`, configured in `vllm-packages.yaml`) for reproducibility.
+Both tools are also installed into the venv for self-contained builds.
 
 ## Quick Start
 
@@ -182,6 +183,7 @@ source ./vllm-env.sh --info   # Show settings
 ```bash
 ./build-vllm.sh --step 14   # Resume from step 14 (e.g., after Triton fix)
 ./build-vllm.sh --rebuild    # Clean everything and rebuild from scratch
+./build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm (no full clean)
 ```
 
 ## Compiler Flags
@@ -234,6 +236,7 @@ all 40+ target features including AVX-512, VAES, VPCLMULQDQ, GFNI, SHA.
 | `CHANGELOG.md` | Version history and notable changes |
 | `QWEN3-VL-EMBED.md` | Qwen3-VL multimodal embedding and reranking deployment (production) |
 | `QWEN3-INT8-QUANT.md` | INT8 quantization strategy for Qwen3-VL on gfx1151 (engineering deep-dive) |
+| `quantize_w8a16.py` | W8A16 quantization script (llmcompressor + RTN) for Qwen3-VL models |
 
 ## Repo Variants
 
@@ -250,7 +253,7 @@ all 40+ target features including AVX-512, VAES, VPCLMULQDQ, GFNI, SHA.
 | AOCL-Utils | amd/aocl-utils | main |
 | AITER | ROCm/aiter | v0.1.16.post3 |
 | llama.cpp | ggml-org/llama.cpp | master |
-| Lemonade | lemonade-sdk/lemonade | v10.8.1 |
+| Lemonade | lemonade-sdk/lemonade | v10.9.0 |
 
 Note: PyTorch, Triton, and Flash Attention use the **ROCm forks**, not
 upstream. The ROCm forks carry AMD-specific fixes (hipify patches, Tensile
@@ -263,19 +266,19 @@ When complete, the build produces 13 optimized wheel packages:
 
 | Wheel | Size | Type |
 |-------|------|------|
-| torch | 647M | C++/HIP |
-| triton | 217M | C++/LLVM |
-| vllm | 48M | C++/HIP |
+| torch | 387M | C++/HIP |
+| triton | 159M | C++/LLVM |
+| vllm | 74M | C++/HIP |
 | amd-aiter | 43M | C++/HIP |
-| numpy | 7.1M | C (meson) |
-| cryptography | 2.4M | Rust |
+| numpy | 7.2M | C (meson) |
+| amdsmi | 2.1M | Pure Python |
+| cryptography | 2.0M | Rust |
 | sentencepiece | 1.5M | C++ (cmake) |
-| amdsmi | 1.4M | Pure Python |
-| torchvision | 1.3M | C++ |
-| zstandard | 940K | C |
-| asyncpg | 828K | Cython |
-| orjson | 344K | Rust |
-| flash_attn | 204K | Pure Python |
+| torchvision | 1.4M | C++ |
+| zstandard | 941K | C |
+| asyncpg | 829K | Cython |
+| orjson | 374K | Rust |
+| flash_attn | 202K | Pure Python |
 
 All wheels are in `/opt/src/vllm/wheels/` and can be installed into any
 Python 3.13 venv.
@@ -388,13 +391,26 @@ The ROCm wheels need the TheRock libraries at runtime. Source
 export LD_LIBRARY_PATH="/opt/src/vllm/local/lib:${LD_LIBRARY_PATH}"
 export HSA_OVERRIDE_GFX_VERSION=11.5.1    # For gfx1150/gfx1151
 export ROCBLAS_USE_HIPBLASLT=1
-export VLLM_USE_TRITON_FLASH_ATTN=0       # Use AITER attention
+export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"  # Reduce GPU memory fragmentation
+export PYTORCH_TUNABLEOP_ENABLED=1           # Auto-tune GEMM kernels for gfx1151
+export VLLM_WORKER_MULTIPROC_METHOD=spawn    # Fix AITER fork() HIP corruption
 ```
 
 Or simply source the activation script:
 
 ```bash
 source /path/to/_gfx115x_/vllm-env.sh
+```
+
+### Eager Mode (Default)
+
+CUDA graph capture is incompatible with CPU weight offloading and can OOM
+during profiling on 48 GB UMA. `vllm-start.sh` defaults to
+`ENFORCE_EAGER=true` (no graph capture) for all roles. This can be
+overridden per-role in `.env`:
+
+```bash
+VLLM_EMBED_ENFORCE_EAGER=false  # Enable CUDA graphs (more VRAM, faster)
 ```
 
 ### System Tuning (Optional)
@@ -424,18 +440,21 @@ Create a `.env` file with role definitions:
 
 ```bash
 # Roles to launch (space-separated)
-VLLM_ROLES="director voice"
+VLLM_ROLES="embed reranker"
 
 # Per-role configuration
-VLLM_DIRECTOR_MODEL="Qwen/Qwen3-32B"
-VLLM_DIRECTOR_PORT=8100
-VLLM_DIRECTOR_DEVICE=rocm
-VLLM_DIRECTOR_GPU_MEMORY_MB=40960
+VLLM_EMBED_MODEL="Qwen/Qwen3-VL-Embedding"
+VLLM_EMBED_PORT=8102
+VLLM_EMBED_DEVICE=rocm
+VLLM_EMBED_GPU_MEMORY_MB=10240
+VLLM_EMBED_RUNNER="pooling"
+VLLM_EMBED_CONVERT="embed"
 
-VLLM_VOICE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
-VLLM_VOICE_PORT=8101
-VLLM_VOICE_DEVICE=rocm
-VLLM_VOICE_GPU_MEMORY_MB=16384
+VLLM_RERANKER_MODEL="Qwen/Qwen3-VL-Reranker"
+VLLM_RERANKER_PORT=8103
+VLLM_RERANKER_DEVICE=cpu          # CPU offload: no GPU memory needed
+VLLM_RERANKER_RUNNER="pooling"
+VLLM_RERANKER_CONVERT="rerank"
 ```
 
 ### Usage

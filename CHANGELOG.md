@@ -24,16 +24,21 @@ Adopted RUNPATH fix and runtime feature merge.
 - **`MAX_NUM_BATCHED_TOKENS` per-role config** (`vllm-start.sh`).
 - **Build skip markers** (BUILD-FIXES #141): vLLM/AITER/FA
   `should_skip_step()` + AITER JIT cache-intact fast path.
-- **16 new `.patch` files** (total now 24).
+- **16 new `.patch` files** (total now 20).
 
 ### Changed
 
 - **vLLM v0.24.0 upgrade**: 12 components re-pinned (PyTorch
   release/2.11, vLLM v0.24.0, AITER v0.1.16.post3, CPython 3.13.9,
-  Lemonade v10.8.1, +7 others). Lemonade config migration v1→v2.
+  Lemonade v10.9.0, +7 others). Lemonade config migration v1→v2.
 - **Patch refactor**: 15 broken sed → 5 new git patches; 8 obsolete
   patches removed after upstream changes. `clean_generated: true`
   added. 36→24 patches.
+- **4 obsolete TheRock patches removed**: `rocblas-roctx-gating` (#110),
+  `rocr-blit-device-libs` (#112), `rccl-iostream-include` (#116),
+  `miopen-ciso646-warnings` (#119) — all already included in pinned
+  TheRock commit `a512f42c`. Build correctly detected them as
+  "already applied". YAML TheRock patch section renumbered 1-18.
 - **Build optimization**: 8 TheRock sub-projects disabled (~30-45 min),
   AITER JIT parallelized (ThreadPoolExecutor, ~5-8× speedup),
   `eval`→`envsubst`, clone dedup, multi-backend skip.
@@ -48,7 +53,8 @@ Adopted RUNPATH fix and runtime feature merge.
 - **Profiler/ROCTX fully disabled** (BUILD-FIXES #105-#119): All ROCTX
   paths in RCCL, rocBLAS, rocSPARSE, hipBLASLt, hipSPARSELt, and MIOpen
   gated on `THEROCK_ENABLE_PROFILER`. ROCR blit kernels get explicit
-  device-lib-path. Migrated to 6 `.patch` files.
+  device-lib-path. Originally migrated to 6 `.patch` files; 4 later
+  removed as obsolete (upstream included in `a512f42c`).
 - **vLLM v0.24.0 API renames** (BUILD-FIXES #133, #140): 15 sed patches
   broken by upstream renames (`TORCH_CHECK`→`STD_TORCH_CHECK`,
   `at::ScalarType`→`torch::headeronly::ScalarType`,

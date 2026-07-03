@@ -1985,7 +1985,7 @@ by default and hard-fail if roctx64/roctracer is not present during configure.
 `-DHIPSPARSELT_ENABLE_MARKER=OFF`, and `-DMIOPEN_USE_ROCTRACER=OFF` into
 their respective CMake args.
 
-### 110. rocBLAS roctracer header probe despite ROCTX=OFF
+### 110. rocBLAS roctracer header probe despite ROCTX=OFF — **SUPERSEDED**
 
 **Files:** `math-libs/BLAS/CMakeLists.txt`,
 `rocm-libraries/projects/rocblas/library/CMakeLists.txt`
@@ -1998,11 +1998,10 @@ super-project layer.
 (2) Gate the shared-library probe on `if(BUILD_SHARED_LIBS AND ROCTX)`.
 (3) Define `DISABLE_ROCTX` compile definition when `NOT ROCTX`.
 
-**Patch**: `patches/rocblas-roctx-gating.patch` (YAML #11+12, migrated from
-sed to .patch). The original sed append command (`a \\\n  if(NOT ROCTX)...`)
-inserted literal `\n` characters instead of real newlines, causing a CMake
-parse error (`Expected a command name, got unquoted argument with text "\n"`)
-at `library/CMakeLists.txt:85`.
+**Patch**: `patches/rocblas-roctx-gating.patch` — **OBSOLETE**: The patch
+content is already included in the pinned TheRock commit `a512f42c`.
+The super-project sed injection (`-DROCTX=OFF`, YAML #10) remains active.
+Patch file and YAML entry removed.
 
 ### 111. rocSPARSE BUILD_WITH_ROCTX not passed by TheRock
 
@@ -2013,7 +2012,7 @@ TheRock does not pass that option, so profiler-disabled builds still fail.
 
 **Fix**: Inject `-DBUILD_WITH_ROCTX=OFF` into the super-project CMake args.
 
-### 112. ROCR-Runtime OpenCL blit kernels missing --rocm-device-lib-path
+### 112. ROCR-Runtime OpenCL blit kernels missing --rocm-device-lib-path — **SUPERSEDED**
 
 **File:** `rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/image/blit_src/CMakeLists.txt`
 
@@ -2033,6 +2032,9 @@ configs (`.cmake` files), not actual libraries — the bitcode lives under
 dep-provider system) and resolves the bitcode directory via
 `AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode`, with a
 `CMAKE_PREFIX_PATH`-based fallback for standalone builds.
+
+**Status**: **OBSOLETE** — The patch content is already included in the
+pinned TheRock commit `a512f42c`. Patch file and YAML entry removed.
 
 ### 113. PyTorch ROCm import failure diagnostics and automatic wheel reinstall
 
@@ -2119,7 +2121,7 @@ rocdecode/rocjpeg before rocprofiler-sdk configure runs, making
 `rocdecode-config.cmake` and `rocdecode-targets.cmake` complete and
 resolvable.
 
-**Patch**: `patches/rocprofiler-sdk-rocdecode-deps.patch` (YAML #19)
+**Patch**: `patches/rocprofiler-sdk-rocdecode-deps.patch` (YAML #16)
 
 **Follow-up**: Adding `rocdecode`/`rocjpeg` as `RUNTIME_DEPS` caused
 `get_target_property() called with non-existent target "rocdecode"` because
@@ -2133,9 +2135,9 @@ rocdecode/rocjpeg only depend on `base`, `core`, and `third-party/sysdeps`
 `add_subdirectory(profiler)` is safe.
 
 **Follow-up patch**: `patches/therock-media-libs-before-profiler.patch`
-(YAML #20)
+(YAML #17)
 
-### 116. rccl missing `<iostream>`/`<map>`/`<string>` for `std::cerr`/`std::map`/`std::string`
+### 116. rccl missing `<iostream>`/`<map>`/`<string>` for `std::cerr`/`std::map`/`std::string` — **SUPERSEDED**
 
 **File:** `rocm-systems/projects/rccl/src/ipc_init.cu`, `rocm-systems/projects/rccl/src/transport/net.cc` (TheRock submodule)
 
@@ -2169,7 +2171,9 @@ the de-duplication, but any CMakeLists.txt flag change triggers a full
 rccl rebuild (34834 targets, ~4h). Source-level `#include` avoids both
 issues.
 
-**Patch**: `patches/rccl-iostream-include.patch` (YAML #21)
+**Patch**: `patches/rccl-iostream-include.patch` (YAML #21) — **OBSOLETE**:
+The missing includes are already present in the pinned TheRock commit
+`a512f42c`. Patch file and YAML entry removed.
 
 ### 117. TheRock kpack split_artifacts.py missing `zstandard` Python module
 
@@ -2224,7 +2228,7 @@ signature in `therock_subproject_dep_provider.cmake:121`. This forces CMake
 to ignore the User Package Registry and use only the explicit `PATHS` from
 the dep-provider.
 
-**Patch**: `patches/therock-dep-provider-no-registry.patch` (YAML #22)
+**Patch**: `patches/therock-dep-provider-no-registry.patch` (YAML #18)
 
 ### 119. MIOpen ciso646 #warning with GCC 15 + C++20
 
@@ -2250,7 +2254,9 @@ because CMake interprets `#` as a comment character in unquoted list
 items, so `-Wno-#warnings` (unquoted) becomes `-Wno-` in the generated
 build.ninja, which is a no-op.
 
-**Patch**: `patches/miopen-ciso646-warnings.patch` (YAML #14)
+**Patch**: `patches/miopen-ciso646-warnings.patch` (YAML #14) — **OBSOLETE**:
+The `-Wno-#warnings` flag is already present in the pinned TheRock commit
+`a512f42c`. Patch file and YAML entry removed.
 
 ### 120. TheRock overbuilds: rccl for 23 architectures, unnecessary components enabled
 
@@ -2327,7 +2333,7 @@ but nested CMake sub-builds (LLVM runtimes, hip-clr, amd-mesa) can inherit
 **Fix**: Add `CC CXX` to the `unset` command in `configure_therock()`.
 `_vllm_source_env` at the end of the function restores them.
 
-### 123. rccl-iostream-include.patch fails — CRLF line endings in ipc_init.cu
+### 123. rccl-iostream-include.patch fails — CRLF line endings in ipc_init.cu — **SUPERSEDED**
 
 **File:** `patches/rccl-iostream-include.patch`
 
@@ -2344,6 +2350,10 @@ uses for validation.
 --dst-prefix=b/rocm-systems/` from the `rocm-systems` submodule. This
 produces correct CRLF context lines for `ipc_init.cu` and includes `index`
 lines with blob hashes. Prepend the copyright header comment.
+
+**Status**: **OBSOLETE** — The underlying patch (BUILD-FIXES #116) was
+removed because the fix is already included in the pinned TheRock commit
+`a512f42c`. This CRLF workaround is moot.
 
 ### 124. hip-clr configure fails — CppHeaderParser missing in pre-existing venv
 
