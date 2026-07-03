@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-03
+
 Upstream sync: [`dbfb70ef`] from `paudley/ai-notes` (2026-06-06).
 Adopted RUNPATH fix and runtime feature merge.
 
