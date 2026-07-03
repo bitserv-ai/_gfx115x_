@@ -316,26 +316,9 @@ packages:
           implicit const void* -> struct* conversions from bsearch(),
           which elfutils has in multiple call sites.
 
-      # 3. Add <cstdint> to yaml-cpp (transitive include removed)
-      - type: sed
-        file: "external/rocprofiler-sdk/external-rocprofiler-sdk/external/yaml-cpp/src/emitterutils.cpp"
-        marker: "<cstdint>"
-        marker_absent: true
-        sed_command: "/#include <algorithm>/a #include <cstdint>"
-        description: >
-          Add missing <cstdint> include to yaml-cpp emitterutils.cpp.
-          Clang 18+ and GCC 13+ removed transitive <cstdint> from
-          <algorithm>, breaking uint32_t usage.
-
-      # 4. Add <cstdint> to elfio (same transitive include issue)
-      - type: sed
-        file: "external/rocprofiler-sdk/external-rocprofiler-sdk/external/elfio/elfio/elf_types.hpp"
-        marker: "<cstdint>"
-        marker_absent: true
-        sed_command: "/#define ELFTYPES_H/a #include <cstdint>"
-        description: >
-          Add missing <cstdint> include to elfio elf_types.hpp. Same
-          transitive include removal as yaml-cpp above.
+      # 3-4. OBSOLETE — yaml-cpp and elfio OLD paths under external/rocprofiler-sdk/
+      # no longer exist in current TheRock source tree. Superseded by patches #16/#17
+      # (new path under rocm-systems/projects/rocprofiler-sdk/).
 
       # 5. Copy MLIR object libraries to install tree
       - type: file_copy
@@ -748,17 +731,11 @@ packages:
           redefinition warnings. These macros are defined in both
           AOCL-LibM headers and glibc complex.h.
 
-      # 3. Fix linker flags for non-AOCC compilers
-      - type: sed
-        file: "src/SConscript"
-        marker: "'-ealm_main'"
-        marker_absent: true
-        sed_command: "s|'-ealm_main'|'-Wl,-e,alm_main', '-fuse-ld=bfd'|"
-        description: >
-          Fix linker flags: -ealm_main is AOCC syntax, use -Wl,-e,alm_main
-          for GCC/Clang. Add -fuse-ld=bfd because hand-written AVX assembly
-          uses absolute relocations that lld rejects in shared libraries;
-          GNU ld handles them via dynamic text relocations.
+      # 3. OBSOLETE — linker flags fixed upstream in AOCL 5.3 (commit 86223910).
+      # Upstream changed '-ealm_main' → '-Wl,-ealm_main'. lld (TheRock LLVM 23)
+      # handles absolute relocations via TEXTREL without -fuse-ld=bfd. Verified:
+      # libalm.so has TEXTREL flag, built with amdclang 23.0.0.
+      # Previously: s|'-ealm_main'|'-Wl,-e,alm_main', '-fuse-ld=bfd'|
 
       # 4. Fix libalm.so RPATH for libau_cpuid.so resolution
       - type: patchelf_rpath
@@ -928,18 +905,9 @@ packages:
           architecture!" and TunableOp cannot include CK kernels in its
           autotuning candidates. The gate is a hardcoded vector of arch strings.
 
-      # 4. Remove HIPGraph.hip dead code (CUDA 12.4+ type with no HIP equivalent)
-      - type: file_rewrite
-        file: "aten/src/ATen/hip/HIPGraph.hip"
-        marker: "cudaGraphConditionalHandle"
-        description: >
-          Replace HIPGraph.hip entirely. hipify creates a
-          set_conditional_handle() function referencing
-          cudaGraphConditionalHandle (CUDA 12.4+ type with no HIP
-          equivalent). The header doesn't declare it, nothing calls it
-          on ROCm -- dead code that fails to compile. Replaced with
-          minimal stub containing only the namespace declaration.
-        note: "Content is a heredoc in build-vllm.sh (too complex for YAML inline)"
+      # 4. OBSOLETE — HIPGraph.hip renamed to HIPGraph.cpp by hipify in
+      # current PyTorch. cudaGraphConditionalHandle removed upstream.
+      # Inline dead code in build-vllm.sh also removed.
 
       # 5. Wheel RPATH: fix build tree paths in torch/lib/*.so
       - type: patchelf_rpath
@@ -986,13 +954,11 @@ packages:
           symbols -- upstream bug that causes "undefined symbol: rsmi_init"
           at runtime.
 
-      # 9. Disable flatbuffers version assertion for compatibility with flatbuffers v25
-      - type: sed
-        file: third_party/gloo/gloo/types.h
-        marker: <cstdint>
-        marker_absent: true
-        sed_command: '/#pragma once/a #include <cstdint>'
-        description: Add missing cstdint for uint8_t etc. in gloo
+      # 9a. OBSOLETE — gloo <cstdint> include added upstream in gloo HEAD
+      # (3135b0b). marker_absent check now always finds marker → skips.
+      # Previously: sed '/#pragma once/a #include <cstdint>' on gloo/types.h
+
+      # 9b. Disable flatbuffers version assertion for compatibility with flatbuffers v25
       - type: sed
         file: torch/csrc/jit/serialization/mobile_bytecode_generated.h
         marker: static_assert(FLATBUFFERS_VERSION_MAJOR == 24
@@ -1040,30 +1006,14 @@ packages:
         sed_command: 's|<cuda\.h>|<hip/hip_runtime_api.h>|g; s|<nvrtc\.h>|<hip/hiprtc.h>|g'
         description: 'Replace CUDA/NVRTC includes with correct HIP equivalents in the template'
 
-      # 12. Fix preprocessor error in LegacyThrustHelpers.hip (ROCm 7.x compat)
-      - type: sed
-        file: aten/src/ATen/native/hip/LegacyThrustHelpers.hip
-        marker: "#if 0 // Fixed: CUB_SUPPORTS_SCAN_BY_KEY"
-        marker_absent: true
-        sed_command: 's|#if !CUB_SUPPORTS_SCAN_BY_KEY()|#if 0 // Fixed: CUB_SUPPORTS_SCAN_BY_KEY macro evaluation error on modern ROCm|'
-        description: >-
-          Disable legacy scan-by-key helper in LegacyThrustHelpers.hip.
-          CUB_SUPPORTS_SCAN_BY_KEY() is a function-like macro undefined in
-          ROCm 7.x hipCUB headers, causing preprocessor syntax error (!()).
-          Modern ROCm provides scan_by_key natively via rocPRIM; #if 0
-          permanently skips the unreachable legacy fallback.
+      # 12. OBSOLETE — LegacyThrustHelpers.hip removed upstream. File no longer
+      # exists in PyTorch source tree. sed silently skipped.
+      # Previously: s|#if !CUB_SUPPORTS_SCAN_BY_KEY()|#if 0 // Fixed...|
 
-      # 13. Fix duplicate symbol: empty typo-file SparseSemiSturcturedApply.hip
-      - type: file_rewrite
-        file: aten/src/ATen/native/sparse/hip/SparseSemiSturcturedApply.hip
-        marker: "_sparse_semi_structured_apply"
-        description: >-
-          Empty the typo-named duplicate SparseSemiSturcturedApply.hip
-          (note: "Sturctured") to fix duplicate symbol error for
-          _sparse_semi_structured_apply during libtorch_hip.so linkage.
-          The correct file SparseSemiStructuredApply.hip provides the
-          symbol; this file is a wildcard-included accident in the ROCm fork.
-        note: "Replacement content is a single comment line (stub in build-vllm.sh)"
+      # 13. OBSOLETE — SparseSemiSturcturedApply.hip (typo file) removed
+      # upstream. Correctly-spelled SparseSemiStructuredApply.hip exists with
+      # TORCH_CHECK(false) stub — no duplicate symbol risk.
+      # Previously: file_rewrite to empty stub.
 
       # 14. Fix ValueError when identifying unknown license in build_bundled.py
       - type: sed

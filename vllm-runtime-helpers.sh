@@ -258,7 +258,9 @@ vllm_gpu_total_mb() {
     local -a rocm_smi_args=(--showmeminfo vram)
     local -a vram_values=()
 
-    visible_device="${HIP_VISIBLE_DEVICES%%,*}"
+    local _hip_visible="${HIP_VISIBLE_DEVICES:-}"
+    visible_device="${_hip_visible%%,*}"
+    unset _hip_visible
     if [[ -n "${visible_device}" ]]; then
         rocm_smi_args=(--device "${visible_device}" "${rocm_smi_args[@]}")
     fi

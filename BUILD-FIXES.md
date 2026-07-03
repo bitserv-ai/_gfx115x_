@@ -3211,3 +3211,27 @@ offline HIP compilation). No parallelism between independent modules.
 Each module is submitted as a task; `as_completed()` collects results.
 AITER's internal FileBaton locking serializes duplicate module builds
 safely. Expected speedup: ~5-8× (from ~1h42min to ~15-20min).
+
+### 156. Obsolete patches removed after upstream changes
+
+**Symptom:** 8 patches in YAML and build-vllm.sh target files that no longer
+exist or have been fixed upstream. All were silent no-ops (skipped by
+`apply_patches`), but cluttered the build configuration.
+
+**Root cause:** Upstream projects evolved since v0.3.0 — files renamed
+(HIPGraph.hip -> HIPGraph.cpp), removed (LegacyThrustHelpers.hip,
+SparseSemiSturcturedApply.hip), includes added (gloo cstdint), linker
+flags fixed (AOCL-LibM -ealm_main -> -Wl,-ealm_main), and old TheRock
+paths replaced (rocprofiler-sdk moved under rocm-systems/projects/).
+
+**Fix:** Removed 8 obsolete patch entries:
+- TheRock T3/T4 (yaml-cpp/elfio OLD path — superseded by T16/T17)
+- PyTorch P4 (HIPGraph.hip — file renamed, marker removed upstream)
+- PyTorch P12 (LegacyThrustHelpers.hip — file removed upstream)
+- PyTorch P13 (SparseSemiSturcturedApply.hip — typo file removed upstream)
+- PyTorch P9a (gloo cstdint — added upstream in gloo HEAD 3135b0b)
+- AOCL-LibM A3 (-ealm_main — upstream fixed + lld 23 accepts TEXTREL)
+- build-vllm.sh inline dead code for HIPGraph.hip + SparseSemiSturcturedApply.hip
+
+Kept (still needed): TheRock T16/T17 (yaml-cpp/elfio NEW path),
+T15 (atomic_codegen), PyTorch P15b (HIPBlas.h SFINAE).
