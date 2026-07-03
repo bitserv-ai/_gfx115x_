@@ -8,7 +8,7 @@
 # defined in VLLM_ROLES.
 #
 # Usage:
-#   scripts/vllm-status.sh
+#   ./vllm-status.sh
 
 set -euo pipefail
 
@@ -34,7 +34,7 @@ unset _SCRIPT_REAL_PATH _SCRIPT_DIR
 # Load .env for VLLM_ROLES and per-role config.
 vllm_load_env "${ENV_FILE}"
 
-VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
+VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_HEALTH_HOST="$(vllm_health_host)"
 
 # =============================================================================
@@ -63,6 +63,7 @@ check_instance() {
 
     if ! kill -0 "${pid}" 2>/dev/null; then
         warn "  Process: NOT running (stale PID: ${pid})"
+        vllm_cleanup_stale_pid "${role}" "${PLATFORM_DIR}"
         return 0
     fi
 
@@ -98,6 +99,8 @@ check_instance() {
 
 main() {
     section "vLLM Server Status"
+
+    require_commands curl
 
     vllm_require_roles
 
