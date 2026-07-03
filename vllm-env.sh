@@ -5,7 +5,7 @@
 # vllm-env.sh - Environment activation for vLLM source builds
 #
 # This script is designed to be SOURCED, not executed:
-#   source scripts/vllm-env.sh
+#   source ./vllm-env.sh
 #
 # It sets compiler flags, ROCm paths, and activates the vLLM venv.
 # Safe to source multiple times (idempotent).
@@ -15,8 +15,8 @@
 #   - /opt/src/vllm/ directory exists (created by build-vllm.sh)
 #
 # Usage:
-#   source scripts/vllm-env.sh              # Activate environment
-#   source scripts/vllm-env.sh --info       # Show current settings
+#   source ./vllm-env.sh              # Activate environment
+#   source ./vllm-env.sh --info       # Show current settings
 
 # Guard: this file must be sourced, not executed
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -466,7 +466,11 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    Linear layers:    ${VLLM_ROCM_USE_AITER_LINEAR:-default}"
     echo "    MoE kernels:      ${VLLM_ROCM_USE_AITER_MOE:-default}"
     echo "    RMSNorm:          ${VLLM_ROCM_USE_AITER_RMSNORM:-default}"
-    echo "    MHA (CK tile):    ${VLLM_ROCM_USE_AITER_MHA:-disabled (CK ABI mismatch)}"
+    local mha_status="disabled"
+    if [[ "${VLLM_ROCM_USE_AITER_MHA:-0}" == "1" ]]; then
+        mha_status="enabled"
+    fi
+    echo "    MHA (CK tile):    ${mha_status}"
     echo "    Triton GEMM:      ${VLLM_ROCM_USE_AITER_TRITON_GEMM:-default}"
     echo "    Triton ROPE:      ${VLLM_ROCM_USE_AITER_TRITON_ROPE:-disabled}"
     echo "    Unified attn:     ${VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:-disabled}"
