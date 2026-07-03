@@ -8,7 +8,7 @@
 # graceful shutdown, and falls back to SIGKILL after a timeout.
 #
 # Usage:
-#   scripts/vllm-stop.sh
+#   ./vllm-stop.sh
 
 set -euo pipefail
 
@@ -60,7 +60,13 @@ stop_instance() {
     fi
 
     info "Sending SIGTERM to vLLM ${role} (PID ${pid})..."
-    kill -TERM "${pid}"
+    local pgid
+    pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d ' ')"
+    if [[ -n "${pgid}" && "${pgid}" != "$$" ]]; then
+        kill -TERM -"${pgid}" 2>/dev/null || kill -TERM "${pid}"
+    else
+        kill -TERM "${pid}"
+    fi
 
     # Wait for graceful shutdown.
     local waited=0
@@ -71,7 +77,11 @@ stop_instance() {
 
     if kill -0 "${pid}" 2>/dev/null; then
         warn "vLLM ${role} did not exit within ${SHUTDOWN_TIMEOUT}s. Sending SIGKILL."
-        kill -KILL "${pid}" 2>/dev/null || true
+        if [[ -n "${pgid}" && "${pgid}" != "$$" ]]; then
+            kill -KILL -"${pgid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+        else
+            kill -KILL "${pid}" 2>/dev/null || true
+        fi
         sleep 1
     fi
 
