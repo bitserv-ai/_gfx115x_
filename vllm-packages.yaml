@@ -279,10 +279,6 @@ packages:
       - pytest
       - mako
       - zstandard
-      # pytest: TheRock's CMake FetchContent may pull pytest even with
-      # BUILD_TESTING=OFF (e.g. via hipBLASLt's test harness or rocm-cmake
-      # validation). Keeping it avoids potential find_package failures.
-      - pytest
     notes: |
       TheRock MUST be built with GCC -- rocprofiler-systems has an explicit
       GNU compiler check that blocks Clang. TheRock produces amdclang (AMD's
@@ -1192,7 +1188,7 @@ packages:
     src_dir: "vllm"
     method: pip
     phase: E
-    steps: [19, 20, 21, 22, 23, 24, 25]
+    steps: [19, 20, 21, 22, 23, 24]
     depends_on: [pytorch, triton, aotriton]
     compiler: amdclang
     skip_marker: null
@@ -1581,7 +1577,7 @@ packages:
     src_dir: "flash-attention"
     method: pip
     phase: F
-    steps: [26, 27, 28]
+    steps: [25, 26, 27, 28]
     depends_on: [pytorch, triton, vllm]
     compiler: amdclang
     skip_marker: null
@@ -1917,15 +1913,14 @@ packages:
         description: "Disable llamacpp version check — custom builds don't match bundled releases"
         sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm-stable": "[^"]*"/"rocm-stable": ""/; /"llamacpp"/,/}/ s/"rocm-nightly": "[^"]*"/"rocm-nightly": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
     notes: |
-      Lemonade inference server built from source (CMake + Ninja), tracks
-      latest default branch. Produces lemond (daemon) + lemonade (CLI)
+      Lemonade inference server built from source (CMake + Ninja) on branch
+      v10.8.1 at pinned commit. Produces lemond (daemon) + lemonade (CLI)
       + web app (React, BUILD_WEB_APP=ON, Node.js required).
 
       AUR package (lemonade-server) kept installed for systemd unit template,
       tmpfiles.d, sysusers.d, and man pages. Systemd override points
       ExecStart to our custom build.
 
-      No branch pinned — clone_pkg() tracks default branch like llama.cpp.
       No Python SDK installed — C++ server handles model downloads,
       .env loading, and hardware detection natively since v10.
 

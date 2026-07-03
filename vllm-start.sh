@@ -32,7 +32,7 @@
 #   - ROCm installed for GPU roles
 #
 # Usage:
-#   scripts/vllm-start.sh
+#   ./vllm-start.sh
 
 set -euo pipefail
 
@@ -123,17 +123,16 @@ vllm_is_aiter_rmsnorm_duplicate_pattern_failure() {
 
     # Primary signature: both rocm_aiter_fusion.py and check_and_add_duplicate_pattern
     # must appear in the log (file name + function name).
-    grep -q "rocm_aiter_fusion.py" "${log_file}" \
-        && grep -q "check_and_add_duplicate_pattern" "${log_file}"
-    if [[ $? -eq 0 ]]; then
+    if grep -q "rocm_aiter_fusion.py" "${log_file}" \
+        && grep -q "check_and_add_duplicate_pattern" "${log_file}"; then
         return 0
     fi
 
-    # Fallback: match the actual RuntimeError exception message that torch's
-    # pattern_matcher emits when skip_duplicates is not set:
-    # "Duplicate pattern X has already been registered"
-    grep -q "Duplicate pattern.*already been registered" "${log_file}" \
-        && grep -q "rocm_aiter_fusion" "${log_file}"
+    if grep -q "Duplicate pattern.*already been registered" "${log_file}" \
+        && grep -q "rocm_aiter_fusion" "${log_file}"; then
+        return 0
+    fi
+    return 1
 }
 
 # Print targeted diagnostics for the duplicate-pattern startup crash.
@@ -257,6 +256,9 @@ start_instance() {
     if [[ -z "${device}" ]]; then
         die "Missing VLLM_${role_upper}_DEVICE in .env"
     fi
+    if [[ "${device}" != "cpu" && "${device}" != "rocm" ]]; then
+        die "Invalid VLLM_${role_upper}_DEVICE=${device}; must be rocm or cpu"
+    fi
 
     # Check if already running.
     if vllm_is_running "${role}" "${PLATFORM_DIR}"; then
@@ -357,20 +359,22 @@ start_instance() {
         info "${role}: skip_mm_profiling: true"
     fi
 
-    # GPU memory: convert MB to utilization fraction.
-    if [[ -n "${gpu_memory_mb}" ]]; then
-        local total_mb utilization
-        total_mb="$(vllm_gpu_total_mb)"
-        utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
-        if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
-            warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
-            utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+    # GPU memory: convert MB to utilization fraction (GPU roles only).
+    if [[ "${device}" != "cpu" ]]; then
+        if [[ -n "${gpu_memory_mb}" ]]; then
+            local total_mb utilization
+            total_mb="$(vllm_gpu_total_mb)"
+            utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
+            if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
+                warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+                utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+            fi
+            cmd_args+=(--gpu-memory-utilization "${utilization}")
+            info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
+        else
+            cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
+            info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
         fi
-        cmd_args+=(--gpu-memory-utilization "${utilization}")
-        info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
-    else
-        cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
-        info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
     fi
 
     # Append extra args (word-split intentionally for space-separated CLI flags).
@@ -505,7 +509,7 @@ main() {
     fi
 
     success "All vLLM instances running."
-    info "Stop with: scripts/vllm-stop.sh"
+    info "Stop with: ./vllm-stop.sh"
 }
 
 main "$@"

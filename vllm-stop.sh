@@ -8,7 +8,7 @@
 # graceful shutdown, and falls back to SIGKILL after a timeout.
 #
 # Usage:
-#   scripts/vllm-stop.sh
+#   ./vllm-stop.sh
 
 set -euo pipefail
 

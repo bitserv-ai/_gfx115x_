@@ -25,10 +25,10 @@
 #   - ~100GB disk space for build artifacts
 #
 # Usage:
-#   scripts/build-vllm.sh             # Full build (idempotent)
-#   scripts/build-vllm.sh --rebuild   # Force rebuild (clean + build)
-#   scripts/build-vllm.sh --step N    # Run from step N onward
-#   scripts/build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
+#   ./build-vllm.sh             # Full build (idempotent)
+#   ./build-vllm.sh --rebuild   # Force rebuild (clean + build)
+#   ./build-vllm.sh --step N    # Run from step N onward
+#   ./build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
 #
 # Build pipeline (36 steps):
 #   Phase A: ROCm SDK (TheRock — builds amdclang used by everything downstream)
@@ -170,7 +170,13 @@ source "${_SCRIPT_DIR}/vllm-env.sh"
 # Copy patch files from repo into ${VLLM_DIR}/patches/ so apply_patches()
 # can reference them via ${VLLM_DIR}/patches/<name>.patch in the YAML.
 mkdir -p "${VLLM_DIR}/patches"
-cp "${_SCRIPT_DIR}"/patches/*.patch "${VLLM_DIR}/patches/"
+shopt -s nullglob
+_patch_files=("${_SCRIPT_DIR}"/patches/*.patch)
+shopt -u nullglob
+if [[ ${#_patch_files[@]} -gt 0 ]]; then
+    cp "${_patch_files[@]}" "${VLLM_DIR}/patches/"
+fi
+unset _patch_files
 
 # Re-source vllm-env.sh to restore compiler flags after steps that unset them
 # (e.g., Python build unsets CFLAGS/LDFLAGS to avoid -lalm contamination,
@@ -228,7 +234,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --step)
+            if [[ $# -lt 2 ]]; then
+                die "--step requires a step number (1-${TOTAL_STEPS:-36})"
+            fi
             START_STEP="$2"
+            if ! [[ "${START_STEP}" =~ ^[0-9]+$ ]] \
+                || [[ "${START_STEP}" -lt 1 ]] \
+                || [[ "${START_STEP}" -gt "${TOTAL_STEPS:-36}" ]]; then
+                die "Invalid --step ${START_STEP}; must be an integer from 1 to ${TOTAL_STEPS:-36}"
+            fi
             shift 2
             ;;
         --force-rebuild)
@@ -522,7 +536,9 @@ install_tools_to_venv() {
     # uv: pip-installable (provides the uv binary in the venv)
     if [[ ! -x "${venv_bin}/uv" ]]; then
         info "Installing uv into venv..."
-        pip install uv -q
+        local uv_version
+        uv_version="$(ycfg '.prerequisites.bootstrap.uv.version')"
+        pip install "uv==${uv_version}" -q
     fi
 
     # yq: standalone Go binary — copy from bootstrap location or system
@@ -1033,7 +1049,7 @@ should_skip_step() {
 # Generic Validation
 # =============================================================================
 # Runs validation commands from the YAML manifest's validation: array.
-# Each command is a shell expression evaluated with eval (supports ${VAR}).
+# Each command is a shell expression expanded via envsubst (supports ${VAR}).
 #
 # Usage: validate_pkg <pkg_key> [die|warn]
 # Default action on failure: warn. Pass "die" to abort on first failure.
@@ -3859,7 +3875,7 @@ except ImportError as e:
     echo ""
     info "Full inference stack build complete!"
     info "  Install directory: ${VLLM_DIR}"
-    info "  Activate with: source scripts/vllm-env.sh"
+    info "  Activate with: source ./vllm-env.sh"
     info "  AITER: ${aiter_status}"
     info "  Components: AOCL-LibM + Python + TheRock + PyTorch + Triton + AOTriton + vLLM + Flash Attention"
     info "  Wheels dir: ${WHEELS_DIR}"
@@ -4177,7 +4193,7 @@ print(path)
         info "vLLM: SKIP (SMOKE_SKIP_VLLM set)"
     else
 
-    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx11510.csv"
+    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx1151.csv"
     info "TunableOp CSV: ${tunableop_csv}"
 
     if python -c "

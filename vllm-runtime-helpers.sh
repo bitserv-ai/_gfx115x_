@@ -170,6 +170,12 @@ vllm_cleanup_stale_pid() {
 # Health Check
 # =============================================================================
 
+# Host for HTTP health/model queries. Defaults to loopback so curl works when
+# VLLM_HOST is 0.0.0.0 (bind-all) for the server listen socket.
+vllm_health_host() {
+    echo "${VLLM_HEALTH_HOST:-127.0.0.1}"
+}
+
 # Poll a vLLM instance's health endpoint until it responds or timeout.
 #
 # Used during startup to wait for the server to become ready. Checks

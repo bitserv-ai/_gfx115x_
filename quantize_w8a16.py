@@ -30,7 +30,7 @@ Output format: compressed-tensors (safetensors), directly loadable by vLLM
 with --quantization compressed-tensors.
 
 Prerequisites:
-  python3.12 -m venv /opt/src/vllm/.venv-quantize
+  /opt/src/vllm/python/bin/python3 -m venv /opt/src/vllm/.venv-quantize
   source /opt/src/vllm/.venv-quantize/bin/activate
   pip install llmcompressor==0.10.0.1 torch transformers compressed-tensors
 
