@@ -123,17 +123,16 @@ vllm_is_aiter_rmsnorm_duplicate_pattern_failure() {
 
     # Primary signature: both rocm_aiter_fusion.py and check_and_add_duplicate_pattern
     # must appear in the log (file name + function name).
-    grep -q "rocm_aiter_fusion.py" "${log_file}" \
-        && grep -q "check_and_add_duplicate_pattern" "${log_file}"
-    if [[ $? -eq 0 ]]; then
+    if grep -q "rocm_aiter_fusion.py" "${log_file}" \
+        && grep -q "check_and_add_duplicate_pattern" "${log_file}"; then
         return 0
     fi
 
-    # Fallback: match the actual RuntimeError exception message that torch's
-    # pattern_matcher emits when skip_duplicates is not set:
-    # "Duplicate pattern X has already been registered"
-    grep -q "Duplicate pattern.*already been registered" "${log_file}" \
-        && grep -q "rocm_aiter_fusion" "${log_file}"
+    if grep -q "Duplicate pattern.*already been registered" "${log_file}" \
+        && grep -q "rocm_aiter_fusion" "${log_file}"; then
+        return 0
+    fi
+    return 1
 }
 
 # Print targeted diagnostics for the duplicate-pattern startup crash.
