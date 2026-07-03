@@ -228,7 +228,15 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --step)
+            if [[ $# -lt 2 ]]; then
+                die "--step requires a step number (1-${TOTAL_STEPS:-36})"
+            fi
             START_STEP="$2"
+            if ! [[ "${START_STEP}" =~ ^[0-9]+$ ]] \
+                || [[ "${START_STEP}" -lt 1 ]] \
+                || [[ "${START_STEP}" -gt "${TOTAL_STEPS:-36}" ]]; then
+                die "Invalid --step ${START_STEP}; must be an integer from 1 to ${TOTAL_STEPS:-36}"
+            fi
             shift 2
             ;;
         --force-rebuild)
