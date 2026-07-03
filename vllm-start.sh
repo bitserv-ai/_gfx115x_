@@ -30,7 +30,7 @@
 #   - ROCm installed for GPU roles
 #
 # Usage:
-#   scripts/vllm-start.sh
+#   ./vllm-start.sh
 
 set -euo pipefail
 
@@ -60,7 +60,7 @@ unset _SCRIPT_REAL_PATH _SCRIPT_DIR
 vllm_load_env "${ENV_FILE}"
 
 # Defaults for global settings.
-VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
+VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_HEALTH_HOST="$(vllm_health_host)"
 VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-180}"
 VLLM_PREFIX_CACHING_HASH_ALGO="${VLLM_PREFIX_CACHING_HASH_ALGO:-xxhash}"
@@ -284,10 +284,9 @@ start_instance() {
         cmd_args+=(--max-num-seqs "${max_num_seqs}")
     fi
 
-    # CRITICAL: Enable eager mode to allow CPU weight offloading in V1 engine.
-    # This bypasses the AssertionError regarding input batch re-initialization.
-    # We default it to true but allow per-role disabling (e.g. for FP8 models).
-    if [[ "${enforce_eager:-true}" == "true" ]]; then
+    # Default off on gfx1151 where torch.compile works; per-role override via
+    # VLLM_<ROLE>_ENFORCE_EAGER=true for CPU-offload roles that need eager mode.
+    if [[ "${enforce_eager:-false}" == "true" ]]; then
         cmd_args+=(--enforce-eager)
     fi
 
@@ -338,20 +337,22 @@ start_instance() {
         info "${role}: skip_mm_profiling: true"
     fi
 
-    # GPU memory: convert MB to utilization fraction.
-    if [[ -n "${gpu_memory_mb}" ]]; then
-        local total_mb utilization
-        total_mb="$(vllm_gpu_total_mb)"
-        utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
-        if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
-            warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
-            utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+    # GPU memory: convert MB to utilization fraction (GPU roles only).
+    if [[ "${device}" != "cpu" ]]; then
+        if [[ -n "${gpu_memory_mb}" ]]; then
+            local total_mb utilization
+            total_mb="$(vllm_gpu_total_mb)"
+            utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
+            if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
+                warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+                utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+            fi
+            cmd_args+=(--gpu-memory-utilization "${utilization}")
+            info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
+        else
+            cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
+            info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
         fi
-        cmd_args+=(--gpu-memory-utilization "${utilization}")
-        info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
-    else
-        cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
-        info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
     fi
 
     # Append extra args (word-split intentionally).
@@ -467,7 +468,7 @@ main() {
     fi
 
     success "All vLLM instances running."
-    info "Stop with: scripts/vllm-stop.sh"
+    info "Stop with: ./vllm-stop.sh"
 }
 
 main "$@"
