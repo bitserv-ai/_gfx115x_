@@ -63,6 +63,7 @@ check_instance() {
 
     if ! kill -0 "${pid}" 2>/dev/null; then
         warn "  Process: NOT running (stale PID: ${pid})"
+        vllm_cleanup_stale_pid "${role}" "${PLATFORM_DIR}"
         return 0
     fi
 
