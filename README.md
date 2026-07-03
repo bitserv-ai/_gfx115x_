@@ -89,9 +89,7 @@ Phase F: Attention (Flash Attention + AITER)
  27. Patch Flash Attention
 
 Phase G: Validation + Warmup
- 29. Smoke test
- 29b. AITER JIT pre-warm   (compile all buildable modules ahead of time)
- 29c. TunableOp warmup     (populate GEMM autotuning CSV)
+ 29. Smoke test + AITER JIT pre-warm
 
 Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
  30. Build Rust wheels     (orjson, cryptography — AVX-512 + VAES)
@@ -100,16 +98,17 @@ Phase H: Optimized Wheels (Zen 5 native builds for downstream venvs)
 
 Phase I: Lemonade Inference Server
   33. Clone Lemonade + build llama.cpp (ROCm + Vulkan + CPU backends)
-  34. Install Lemonade SDK from PyPI
+  34. Build Lemonade Server from source
   35. Validate Lemonade (all backends)
-  36. Backend smoke test
+  36. Backend smoke test (TunableOp warmup + llama.cpp backends)
 ```
 
 ### Lemonade: Triple-Backend llama.cpp
 
 Phase I builds [llama.cpp](https://github.com/ggml-org/llama.cpp) with
-three backends, managed by the
-[Lemonade SDK](https://pypi.org/project/lemonade-sdk/):
+three backends, managed by
+[Lemonade Server](https://github.com/lemonade-sdk/lemonade) (built from
+source in step 34):
 
 | Backend | Best For | Notes |
 |---------|----------|-------|
@@ -240,16 +239,17 @@ all 40+ target features including AVX-512, VAES, VPCLMULQDQ, GFNI, SHA.
 | Component | Repository | Branch |
 |-----------|-----------|--------|
 | TheRock | ROCm/TheRock | main |
-| PyTorch | ROCm/pytorch | develop |
-| TorchVision | pytorch/vision | main |
+| PyTorch | ROCm/pytorch | release/2.11 |
+| TorchVision | pytorch/vision | v0.24.1 |
 | Triton | ROCm/triton | main_perf |
 | Flash Attention | ROCm/flash-attention | main_perf |
-| vLLM | vllm-project/vllm | main |
+| vLLM | vllm-project/vllm | v0.24.0 |
 | AOTriton | ROCm/aotriton | main |
-| AOCL-LibM | amd/aocl-libm-ose | main |
+| AOCL-LibM | amd/aocl-libm-ose | master |
 | AOCL-Utils | amd/aocl-utils | main |
+| AITER | ROCm/aiter | v0.1.16.post3 |
 | llama.cpp | ggml-org/llama.cpp | master |
-| Lemonade | lemonade-sdk/lemonade | v10.0.0 |
+| Lemonade | lemonade-sdk/lemonade | v10.8.1 |
 
 Note: PyTorch, Triton, and Flash Attention use the **ROCm forks**, not
 upstream. The ROCm forks carry AMD-specific fixes (hipify patches, Tensile
@@ -337,20 +337,20 @@ python-preference = "only-system"
 
 override-dependencies = [
     # Source-built ROCm wheels (dev versions resolved via find-links)
-    "torch==2.12.0a0+git7735e5b",
-    "triton==3.0.0+gitcb89b617",
-    "torchvision==0.26.0a0+5328524",
-    "vllm==0.17.1rc1.dev169+g6590a3ecd.d20260315.rocm713",
-    "flash-attn==2.8.4",
-    "amd-aiter==0.1.11.dev32+g9a469a608.d20260317",
-    "amdsmi==26.3.0+093b66caa3.dirty",
+    "torch",          # release/2.11 from ROCm/pytorch
+    "triton",         # main_perf from ROCm/triton
+    "torchvision",    # v0.24.1
+    "vllm",           # v0.24.0
+    "flash-attn",
+    "amd-aiter",      # v0.1.16.post3
+    "amdsmi",
     # Zen 5 optimized native wheels
-    "numpy==2.4.3",
-    "cryptography==46.0.5",
-    "orjson==3.11.7",
-    "sentencepiece==0.2.1",
-    "zstandard==0.25.0",
-    "asyncpg==0.31.0",
+    "numpy",
+    "cryptography",
+    "orjson",
+    "sentencepiece",
+    "zstandard",
+    "asyncpg",
 ]
 ```
 
