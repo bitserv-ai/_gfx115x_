@@ -8,7 +8,7 @@
 # defined in VLLM_ROLES.
 #
 # Usage:
-#   scripts/vllm-status.sh
+#   ./vllm-status.sh
 
 set -euo pipefail
 

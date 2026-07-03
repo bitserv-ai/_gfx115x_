@@ -32,7 +32,7 @@
 #   - ROCm installed for GPU roles
 #
 # Usage:
-#   scripts/vllm-start.sh
+#   ./vllm-start.sh
 
 set -euo pipefail
 
@@ -509,7 +509,7 @@ main() {
     fi
 
     success "All vLLM instances running."
-    info "Stop with: scripts/vllm-stop.sh"
+    info "Stop with: ./vllm-stop.sh"
 }
 
 main "$@"

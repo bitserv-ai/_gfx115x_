@@ -25,10 +25,10 @@
 #   - ~100GB disk space for build artifacts
 #
 # Usage:
-#   scripts/build-vllm.sh             # Full build (idempotent)
-#   scripts/build-vllm.sh --rebuild   # Force rebuild (clean + build)
-#   scripts/build-vllm.sh --step N    # Run from step N onward
-#   scripts/build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
+#   ./build-vllm.sh             # Full build (idempotent)
+#   ./build-vllm.sh --rebuild   # Force rebuild (clean + build)
+#   ./build-vllm.sh --step N    # Run from step N onward
+#   ./build-vllm.sh --step 24 --force-rebuild vllm  # Rebuild only vllm
 #
 # Build pipeline (36 steps):
 #   Phase A: ROCm SDK (TheRock — builds amdclang used by everything downstream)
@@ -3873,7 +3873,7 @@ except ImportError as e:
     echo ""
     info "Full inference stack build complete!"
     info "  Install directory: ${VLLM_DIR}"
-    info "  Activate with: source scripts/vllm-env.sh"
+    info "  Activate with: source ./vllm-env.sh"
     info "  AITER: ${aiter_status}"
     info "  Components: AOCL-LibM + Python + TheRock + PyTorch + Triton + AOTriton + vLLM + Flash Attention"
     info "  Wheels dir: ${WHEELS_DIR}"
