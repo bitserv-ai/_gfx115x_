@@ -100,6 +100,8 @@ check_instance() {
 main() {
     section "vLLM Server Status"
 
+    require_commands curl
+
     vllm_require_roles
 
     for role in ${VLLM_ROLES}; do
