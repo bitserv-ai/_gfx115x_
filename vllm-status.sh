@@ -35,6 +35,7 @@ unset _SCRIPT_REAL_PATH _SCRIPT_DIR
 vllm_load_env "${ENV_FILE}"
 
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
+VLLM_HEALTH_HOST="$(vllm_health_host)"
 
 # =============================================================================
 # Instance Status
@@ -73,7 +74,7 @@ check_instance() {
         return 0
     fi
 
-    local health_url="http://${VLLM_HOST}:${port}/health"
+    local health_url="http://${VLLM_HEALTH_HOST}:${port}/health"
     if curl -sf "${health_url}" > /dev/null 2>&1; then
         success "  Health:  healthy"
     else
@@ -83,7 +84,7 @@ check_instance() {
 
     # 3. Model info from /v1/models.
     local model_ids
-    model_ids="$(vllm_query_models "${VLLM_HOST}" "${port}")"
+    model_ids="$(vllm_query_models "${VLLM_HEALTH_HOST}" "${port}")"
     if [[ -n "${model_ids}" ]]; then
         info "  Models:  ${model_ids}"
     else

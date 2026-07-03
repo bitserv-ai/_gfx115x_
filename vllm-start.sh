@@ -61,6 +61,7 @@ vllm_load_env "${ENV_FILE}"
 
 # Defaults for global settings.
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
+VLLM_HEALTH_HOST="$(vllm_health_host)"
 VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-180}"
 VLLM_PREFIX_CACHING_HASH_ALGO="${VLLM_PREFIX_CACHING_HASH_ALGO:-xxhash}"
 VLLM_STARTUP_ERROR_TAIL_LINES="${VLLM_STARTUP_ERROR_TAIL_LINES:-120}"
@@ -393,7 +394,7 @@ start_instance() {
         # Health check loop.
         info "Waiting for ${role} health check (timeout: ${VLLM_STARTUP_TIMEOUT}s)..."
 
-        if vllm_poll_health "${VLLM_HOST}" "${port}" "${VLLM_STARTUP_TIMEOUT}" "${instance_pid}"; then
+        if vllm_poll_health "${VLLM_HEALTH_HOST}" "${port}" "${VLLM_STARTUP_TIMEOUT}" "${instance_pid}"; then
             success "vLLM ${role} ready (PID: ${instance_pid}, port: ${port})"
 
             # Log which attention backend was actually selected (parse vLLM log).
