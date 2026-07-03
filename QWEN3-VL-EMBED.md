@@ -143,6 +143,7 @@ VLLM_QWEN3_RERANK_W8A16_LIMIT_MM_PER_PROMPT='{"video": 0, "image": 1}'
 # Global Settings — Production: dual W8A16 instances
 # =============================================================================
 VLLM_ROLES="qwen3_embed_w8a16 qwen3_rerank_w8a16"
+# Default is 127.0.0.1; set 0.0.0.0 for LAN access.
 VLLM_HOST="0.0.0.0"
 VLLM_STARTUP_TIMEOUT=1200
 # AITER: 3.5x embed speedup validated (0.56s → 0.16s). First start compiles
