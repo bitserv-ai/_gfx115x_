@@ -4177,7 +4177,7 @@ print(path)
         info "vLLM: SKIP (SMOKE_SKIP_VLLM set)"
     else
 
-    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx11510.csv"
+    local tunableop_csv="${VLLM_DIR}/tunableop_results_gfx1151.csv"
     info "TunableOp CSV: ${tunableop_csv}"
 
     if python -c "

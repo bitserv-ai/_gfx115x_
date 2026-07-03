@@ -301,7 +301,7 @@ export TORCH_BLAS_PREFER_HIPBLASLT=1
 # persists tuning data across vLLM restarts — critical for Strix Halo where the
 # default kernel selection often picks suboptimal shapes for the 40-CU iGPU.
 export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx11510.csv"
+export PYTORCH_TUNABLEOP_FILENAME="${VLLM_DIR}/tunableop_results_gfx1151.csv"
 
 # torch.inductor codegen bug: AttrsDescriptor.__repr__() in triton/backends/
 # compiler.py produces invalid Python (angle-bracket object repr) in generated
