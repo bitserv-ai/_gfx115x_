@@ -170,7 +170,13 @@ source "${_SCRIPT_DIR}/vllm-env.sh"
 # Copy patch files from repo into ${VLLM_DIR}/patches/ so apply_patches()
 # can reference them via ${VLLM_DIR}/patches/<name>.patch in the YAML.
 mkdir -p "${VLLM_DIR}/patches"
-cp "${_SCRIPT_DIR}"/patches/*.patch "${VLLM_DIR}/patches/"
+shopt -s nullglob
+_patch_files=("${_SCRIPT_DIR}"/patches/*.patch)
+shopt -u nullglob
+if [[ ${#_patch_files[@]} -gt 0 ]]; then
+    cp "${_patch_files[@]}" "${VLLM_DIR}/patches/"
+fi
+unset _patch_files
 
 # Re-source vllm-env.sh to restore compiler flags after steps that unset them
 # (e.g., Python build unsets CFLAGS/LDFLAGS to avoid -lalm contamination,
