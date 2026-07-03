@@ -256,6 +256,9 @@ start_instance() {
     if [[ -z "${device}" ]]; then
         die "Missing VLLM_${role_upper}_DEVICE in .env"
     fi
+    if [[ "${device}" != "cpu" && "${device}" != "rocm" ]]; then
+        die "Invalid VLLM_${role_upper}_DEVICE=${device}; must be rocm or cpu"
+    fi
 
     # Check if already running.
     if vllm_is_running "${role}" "${PLATFORM_DIR}"; then
