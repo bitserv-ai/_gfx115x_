@@ -1917,15 +1917,14 @@ packages:
         description: "Disable llamacpp version check — custom builds don't match bundled releases"
         sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm-stable": "[^"]*"/"rocm-stable": ""/; /"llamacpp"/,/}/ s/"rocm-nightly": "[^"]*"/"rocm-nightly": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
     notes: |
-      Lemonade inference server built from source (CMake + Ninja), tracks
-      latest default branch. Produces lemond (daemon) + lemonade (CLI)
+      Lemonade inference server built from source (CMake + Ninja) on branch
+      v10.8.1 at pinned commit. Produces lemond (daemon) + lemonade (CLI)
       + web app (React, BUILD_WEB_APP=ON, Node.js required).
 
       AUR package (lemonade-server) kept installed for systemd unit template,
       tmpfiles.d, sysusers.d, and man pages. Systemd override points
       ExecStart to our custom build.
 
-      No branch pinned — clone_pkg() tracks default branch like llama.cpp.
       No Python SDK installed — C++ server handles model downloads,
       .env loading, and hardware detection natively since v10.
 
