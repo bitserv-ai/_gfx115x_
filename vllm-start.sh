@@ -357,20 +357,22 @@ start_instance() {
         info "${role}: skip_mm_profiling: true"
     fi
 
-    # GPU memory: convert MB to utilization fraction.
-    if [[ -n "${gpu_memory_mb}" ]]; then
-        local total_mb utilization
-        total_mb="$(vllm_gpu_total_mb)"
-        utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
-        if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
-            warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
-            utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+    # GPU memory: convert MB to utilization fraction (GPU roles only).
+    if [[ "${device}" != "cpu" ]]; then
+        if [[ -n "${gpu_memory_mb}" ]]; then
+            local total_mb utilization
+            total_mb="$(vllm_gpu_total_mb)"
+            utilization="$(vllm_mb_to_utilization "${gpu_memory_mb}" "${total_mb}")"
+            if [[ "$(echo "${utilization} > ${VLLM_MAX_GPU_MEMORY_UTILIZATION}" | bc)" -eq 1 ]]; then
+                warn "${role}: requested ${gpu_memory_mb}MB exceeds detected ${total_mb}MB; capping --gpu-memory-utilization to ${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+                utilization="${VLLM_MAX_GPU_MEMORY_UTILIZATION}"
+            fi
+            cmd_args+=(--gpu-memory-utilization "${utilization}")
+            info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
+        else
+            cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
+            info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
         fi
-        cmd_args+=(--gpu-memory-utilization "${utilization}")
-        info "${role}: GPU memory ${gpu_memory_mb}MB / ${total_mb}MB = ${utilization}"
-    else
-        cmd_args+=(--gpu-memory-utilization "${VLLM_MAX_GPU_MEMORY_UTILIZATION}")
-        info "${role}: GPU memory utilization capped at ${VLLM_MAX_GPU_MEMORY_UTILIZATION} (default)"
     fi
 
     # Append extra args (word-split intentionally for space-separated CLI flags).
