@@ -1047,7 +1047,7 @@ should_skip_step() {
 # Generic Validation
 # =============================================================================
 # Runs validation commands from the YAML manifest's validation: array.
-# Each command is a shell expression evaluated with eval (supports ${VAR}).
+# Each command is a shell expression expanded via envsubst (supports ${VAR}).
 #
 # Usage: validate_pkg <pkg_key> [die|warn]
 # Default action on failure: warn. Pass "die" to abort on first failure.
