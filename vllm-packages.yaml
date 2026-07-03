@@ -1577,7 +1577,7 @@ packages:
     src_dir: "flash-attention"
     method: pip
     phase: F
-    steps: [26, 27, 28]
+    steps: [25, 26, 27, 28]
     depends_on: [pytorch, triton, vllm]
     compiler: amdclang
     skip_marker: null
