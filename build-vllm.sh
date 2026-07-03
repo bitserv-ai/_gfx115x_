@@ -536,7 +536,9 @@ install_tools_to_venv() {
     # uv: pip-installable (provides the uv binary in the venv)
     if [[ ! -x "${venv_bin}/uv" ]]; then
         info "Installing uv into venv..."
-        pip install uv -q
+        local uv_version
+        uv_version="$(ycfg '.prerequisites.bootstrap.uv.version')"
+        pip install "uv==${uv_version}" -q
     fi
 
     # yq: standalone Go binary — copy from bootstrap location or system
