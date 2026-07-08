@@ -1,0 +1,34 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/include/llama.h b/include/llama.h
+index b89ab758b..c58622d1b 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -780,6 +780,28 @@ extern "C" {
+     // Check if the memory supports shifting
+     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
+ 
++    // Expand the recurrent state to new_n_seq_max cells (for deferred backup allocation).
++    // Returns true on success. No-op if the memory is already large enough or has no recurrent component.
++    LLAMA_API bool llama_memory_recurrent_expand(llama_memory_t mem, uint32_t new_n_seq_max);
++
++    // Shrink the recurrent state to new_n_seq_max cells (frees GPU memory for prefill).
++    // Returns true on success. No-op if the memory is already small enough or has no recurrent component.
++    LLAMA_API bool llama_memory_recurrent_shrink(llama_memory_t mem, uint32_t new_n_seq_max);
++
++    // Context-level recurrent resize. These variants also invalidate the context scheduler/graph cache
++    // because recurrent tensors are reallocated and graph nodes hold tensor pointers.
++    LLAMA_API bool llama_context_recurrent_expand(struct llama_context * ctx, uint32_t new_n_seq_max);
++    LLAMA_API bool llama_context_recurrent_shrink(struct llama_context * ctx, uint32_t new_n_seq_max);
++
++    // Discard any saved recurrent checkpoint. Used after loading state from
++    // prompt cache to prevent expand() from overwriting it with stale data.
++    LLAMA_API void llama_context_recurrent_clear_checkpoint(struct llama_context * ctx);
++
++    // Remove the checkpoint entry for a specific sequence, so that
++    // restore_checkpoint() during expand() does not overwrite the slot's
++    // freshly loaded state with the stale pre-shrink backup.
++    LLAMA_API void llama_context_recurrent_checkpoint_remove_seq(struct llama_context * ctx, llama_seq_id seq_id);
++
+     //
+     // State / sessions
+     //

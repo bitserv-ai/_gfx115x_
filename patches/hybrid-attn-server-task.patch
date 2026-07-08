@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index 775f50baf..c7390622a 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1730,7 +1730,7 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+                 GGML_ASSERT(ctx_dft);
+ 
+                 const size_t size = data.size();
+-                const size_t n = llama_state_seq_set_data_ext(ctx_dft, data.data(), size, id_slot, 0);
++                const size_t n = llama_state_seq_set_data_ext(ctx_dft, data.data(), size, id_slot, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                 if (n != size) {
+                     SRV_WRN("failed to restore state with size %zu\n", size);
+ 

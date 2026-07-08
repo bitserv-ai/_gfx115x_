@@ -283,8 +283,7 @@ start_instance() {
         vllm serve "${model}"
         --host "${VLLM_HOST}"
         --port "${port}"
-        --enable-prefix-caching
-        --prefix-caching-hash-algo "${VLLM_PREFIX_CACHING_HASH_ALGO}"
+        --no-enable-prefix-caching
     )
 
     if [[ -n "${max_model_len}" ]]; then

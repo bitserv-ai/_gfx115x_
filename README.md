@@ -236,7 +236,10 @@ all 40+ target features including AVX-512, VAES, VPCLMULQDQ, GFNI, SHA.
 | `CHANGELOG.md` | Version history and notable changes |
 | `QWEN3-VL-EMBED.md` | Qwen3-VL multimodal embedding and reranking deployment (production) |
 | `QWEN3-INT8-QUANT.md` | INT8 quantization strategy for Qwen3-VL on gfx1151 (engineering deep-dive) |
-| `quantize_w8a16.py` | W8A16 quantization script (llmcompressor + RTN) for Qwen3-VL models |
+| `extras/quantize_w8a16.py` | W8A16 quantization script (llmcompressor + RTN) for Qwen3-VL models |
+| `extras/make-deploy-tarball.sh` | Build deploy tarball for target systems |
+| `extras/install-deploy.sh` | Install deploy bundle on target system |
+| `extras/DEPLOY.md` | Deploy documentation |
 
 ## Repo Variants
 

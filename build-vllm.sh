@@ -949,6 +949,34 @@ apply_patches() {
                 ;;
         esac
     done
+
+    # Write a patch-hash marker so should_skip_step / build_vllm can detect
+    # when patches have changed since the last successful build. The hash is
+    # computed over all patch files referenced in the YAML for this package,
+    # not over the patched source files (those may differ due to upstream
+    # commits). This catches the case where a new patch was added or an
+    # existing patch was modified, but the wheel was not rebuilt.
+    local _hash_file="${VLLM_DIR}/.patch-hash-${pkg_key}"
+    local _patch_hash=""
+    local _pc
+    _pc="$(ycfg ".packages.${pkg_key}.patches | length" 2>/dev/null || echo 0)"
+    if [[ "${_pc}" -gt 0 ]]; then
+        local _pf
+        for i in $(seq 0 $(( _pc - 1 ))); do
+            local _pt
+            _pt="$(ycfg ".packages.${pkg_key}.patches[${i}].type")"
+            if [[ "${_pt}" == "patch" ]]; then
+                _pf="$(ycfg ".packages.${pkg_key}.patches[${i}].path")"
+                _pf="${_pf//\$\{VLLM_DIR\}/${VLLM_DIR}}"
+                _pf="${_pf//\$\{LOCAL_PREFIX\}/${LOCAL_PREFIX}}"
+                if [[ -f "${_pf}" ]]; then
+                    _patch_hash="${_patch_hash}$(md5sum "${_pf}" | cut -d' ' -f1)"
+                fi
+            fi
+        done
+        _patch_hash="$(echo -n "${_patch_hash}" | md5sum | cut -d' ' -f1)"
+        echo "${_patch_hash}" > "${_hash_file}"
+    fi
 }
 
 # =============================================================================
@@ -2810,9 +2838,30 @@ CONSTRAINTS_EOF
 build_vllm() {
     log_step 24 "Build vLLM"
 
+    # Patch-hash check: if patches have changed since the last successful
+    # build, force a rebuild even if should_skip_step would skip. This
+    # prevents stale wheels from being installed when only Python patches
+    # (no C++/HIP) were modified. (BUILD-FIXES #161)
+    local _patch_hash_file="${VLLM_DIR}/.patch-hash-vllm"
+    local _current_patch_hash=""
+    if [[ -f "${_patch_hash_file}" ]]; then
+        _current_patch_hash="$(cat "${_patch_hash_file}")"
+    fi
+
+    local _force_vllm_rebuild=false
     if should_skip_step vllm; then
-        cd "${VLLM_DIR}"
-        return
+        # Check if patches changed since last build
+        local _saved_hash=""
+        if [[ -f "${VLLM_DIR}/.patch-hash-built-vllm" ]]; then
+            _saved_hash="$(cat "${VLLM_DIR}/.patch-hash-built-vllm")"
+        fi
+        if [[ -n "${_current_patch_hash}" && "${_current_patch_hash}" != "${_saved_hash}" ]]; then
+            info "vLLM patches changed since last build — forcing rebuild"
+            _force_vllm_rebuild=true
+        else
+            cd "${VLLM_DIR}"
+            return
+        fi
     fi
 
     cd "${VLLM_SRC}"
@@ -2878,6 +2927,41 @@ build_vllm() {
     if [[ -n "${_vllm_wheel}" ]]; then
         info "Installing vLLM wheel into build venv..."
         uv pip install --force-reinstall --no-deps "${_vllm_wheel}"
+
+        # Post-install verification: compare a key patched Python file
+        # between source tree and installed site-packages to confirm the
+        # wheel contains the patched code. (BUILD-FIXES #161)
+        local _verify_file="vllm/v1/attention/ops/triton_unified_attention.py"
+        local _src_file="${VLLM_SRC}/${_verify_file}"
+        local _inst_file="${VLLM_VENV}/lib/python*/site-packages/${_verify_file}"
+        # Expand glob
+        _inst_file="$(compgen -G "${_inst_file}" | head -1)"
+        if [[ -f "${_src_file}" && -f "${_inst_file}" ]]; then
+            local _src_md5 _inst_md5
+            _src_md5="$(md5sum "${_src_file}" | cut -d' ' -f1)"
+            _inst_md5="$(md5sum "${_inst_file}" | cut -d' ' -f1)"
+            if [[ "${_src_md5}" == "${_inst_md5}" ]]; then
+                success "Post-install verification: ${_verify_file} matches source tree"
+            else
+                warn "Post-install verification FAILED: ${_verify_file} differs from source tree"
+                warn "  source: ${_src_md5} (${_src_file})"
+                warn "  installed: ${_inst_md5} (${_inst_file})"
+                warn "  Reinstalling wheel..."
+                uv pip install --force-reinstall --no-deps "${_vllm_wheel}"
+                _inst_md5="$(md5sum "${_inst_file}" | cut -d' ' -f1)"
+                if [[ "${_src_md5}" == "${_inst_md5}" ]]; then
+                    success "Post-install verification passed after reinstall"
+                else
+                    error "Post-install verification STILL FAILED after reinstall"
+                    error "  Manual intervention required — check wheel build / uv pip install"
+                fi
+            fi
+        fi
+    fi
+
+    # Save patch-hash marker for this successful build
+    if [[ -n "${_current_patch_hash}" ]]; then
+        echo "${_current_patch_hash}" > "${VLLM_DIR}/.patch-hash-built-vllm"
     fi
 
     cd "${VLLM_DIR}"
@@ -4887,10 +4971,8 @@ clone_and_build_lemonade() {
         echo "${_backend_name}" > "${_backend_dir}/backend.txt"
     }
 
-    # Skip only if ALL backends are built (per-backend check, A.13)
-    if [[ -x "${LLAMACPP_ROCM_DIR}/llama-server" \
-       && -x "${LLAMACPP_VULKAN_DIR}/llama-server" \
-       && -x "${LLAMACPP_CPU_DIR}/llama-server" ]]; then
+    # Check if all backends are already built (should_skip_step respects --force-rebuild)
+    if should_skip_step llamacpp; then
         info "All llama.cpp backends already built (ROCm+Vulkan+CPU)"
     else
         # 1. Reset source tree
@@ -5054,6 +5136,34 @@ validate_lemonade() {
         local _rpath
         _rpath="$(readelf -d "${_build_dir}/lemond" 2>/dev/null | grep -oP 'RUNPATH.*\[.*\]' || echo "none")"
         info "lemond RUNPATH: ${_rpath}"
+    fi
+
+    # ------------------------------------------------------------------
+    # Publish version.txt to Lemonade cache (BUILD-FIXES #158)
+    # ------------------------------------------------------------------
+    # Lemonade v10.9.0 reads version.txt from its own install directory
+    # (~/.cache/lemonade/bin/llamacpp/<backend>/), not from the custom
+    # binary path. Without these files the web UI shows "not installed"
+    # even though the API reports state=installed.
+    local _lemonade_cache="${HOME}/.cache/lemonade/bin/llamacpp"
+    local _llama_ver=""
+    for _bd in "${LLAMACPP_ROCM_DIR}" "${LLAMACPP_VULKAN_DIR}" "${LLAMACPP_CPU_DIR}"; do
+        if [[ -f "${_bd}/version.txt" ]]; then
+            _llama_ver="$(cat "${_bd}/version.txt")"
+            break
+        fi
+    done
+
+    if [[ -n "${_llama_ver}" ]]; then
+        mkdir -p "${_lemonade_cache}/rocm-stable" \
+                 "${_lemonade_cache}/vulkan" \
+                 "${_lemonade_cache}/cpu"
+        for _b in rocm-stable vulkan cpu; do
+            echo "${_llama_ver}" > "${_lemonade_cache}/${_b}/version.txt"
+        done
+        success "Lemonade version.txt published (${_llama_ver}) for all backends"
+    else
+        warn "No llama.cpp version.txt found in build dirs — skipping Lemonade cache publish"
     fi
 
     success "Lemonade validation complete (Source Build + Backends)"

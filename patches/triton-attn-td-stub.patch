@@ -1,0 +1,55 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/v1/attention/ops/triton_unified_attention.py b/vllm/v1/attention/ops/triton_unified_attention.py
+--- a/vllm/v1/attention/ops/triton_unified_attention.py
++++ b/vllm/v1/attention/ops/triton_unified_attention.py
+@@ -34,6 +34,23 @@
+ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+ float8_info = torch.finfo(current_platform.fp8_dtype())
+ 
++# Resolve make_tensor_descriptor with fallback for Triton < 3.3.
++# triton_unified_attention.py calls make_tensor_descriptor directly in
++# @triton.jit helpers (_load_q_td, _load_kv_tile_td, _store_output_td).
++# These are XPU-only (USE_TD=False on CUDA/ROCm), but Triton's JIT AST
++# visitor parses all nodes before constexpr branch pruning, triggering
++# AttributeError on Triton 3.0.0 which lacks make_tensor_descriptor.
++# FLA ops (fla/ops/op.py) already handle this via upstream PR #37088/#38981,
++# but unified_attention was not patched. Mirrors the FLA ops pattern.
++if hasattr(tl, "make_tensor_descriptor"):
++    _make_tensor_descriptor = tl.make_tensor_descriptor
++elif hasattr(tl, "_experimental_make_tensor_descriptor"):
++    _make_tensor_descriptor = tl._experimental_make_tensor_descriptor
++else:
++
++    @triton.jit
++    def _make_tensor_descriptor(base, shape, strides, block_shape, _builder=None):
++        return None
+ 
+ @triton.jit
+ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+@@ -98,7 +115,7 @@
+         + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
+         + (kv_head_idx * num_queries_per_kv) * query_stride_1
+     )
+-    q_desc = tl.make_tensor_descriptor(
++    q_desc = _make_tensor_descriptor(
+         base=q_base,
+         shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
+         strides=(query_stride_0, 1),
+@@ -133,7 +150,7 @@
+         + physical_block_idx_scalar * stride_cache_0
+         + kv_head_idx * stride_cache_2
+     )
+-    desc = tl.make_tensor_descriptor(
++    desc = _make_tensor_descriptor(
+         base=base,
+         shape=(BLOCK_SIZE, HEAD_SIZE),
+         strides=(stride_cache_1, stride_cache_3),
+@@ -163,7 +180,7 @@
+     are the same in both modes, so share one helper.
+     """
+     acc = acc.to(base_ptr.dtype.element_ty)
+-    output_desc = tl.make_tensor_descriptor(
++    output_desc = _make_tensor_descriptor(
+         base=base_ptr,
+         shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
+         strides=(stride_token, stride_head, 1),

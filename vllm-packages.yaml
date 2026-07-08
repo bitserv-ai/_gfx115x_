@@ -1517,6 +1517,37 @@ packages:
           False on gfx1x — CK GEMM crashes on RDNA. Only platform-level
           FP8 support is enabled; per-feature gates remain independent.
 
+      # 41. Triton make_tensor_descriptor stub (BUILD-FIXES #159)
+      - type: patch
+        path: "${VLLM_DIR}/patches/triton-attn-td-stub.patch"
+        description: >
+          Triton 3.0.0 (main_perf @ 0ec280cf) lacks tl.make_tensor_descriptor
+          (added in Triton 3.3+). vLLM's triton_unified_attention.py calls
+          tl.make_tensor_descriptor directly in @triton.jit helper functions
+          (_load_q_td, _load_kv_tile_td, _store_output_td). These are XPU-only
+          (USE_TD=False on CUDA/ROCm), but Triton's JIT AST visitor parses all
+          nodes before constexpr pruning, triggering AttributeError even on
+          dead-code branches. FLA ops (fla/ops/op.py) already have a local
+          stub fallback (upstream PR #37088/#38981), but unified_attention was
+          not patched. Fix: resolve make_tensor_descriptor at module level with
+          fallback stub, mirroring the FLA ops pattern. Replaces 3 call sites.
+          No runtime impact — stub returns None, USE_TD=False on ROCm, branch
+          never executed.
+
+      # 42. Triton chained or→parentheses in attention helpers (BUILD-FIXES #162)
+      - type: patch
+        path: "${VLLM_DIR}/patches/triton-attn-chained-bool.patch"
+        description: >
+          Triton main_perf (0ec280cf) rejects chained boolean operators
+          (A or B or C) without parentheses. vLLM's triton_attention_helpers.py
+          compute_tile_loop_bounds() uses a 3-way or chain in an if-statement.
+          When TRITON_ATTN backend is selected (e.g. for int8_per_token_head
+          KV-cache), the @triton.jit helper is inlined into the attention kernel
+          and Triton's AST-to-TTIR compiler raises UnsupportedLanguageConstruct.
+          Fix: add parentheses A or (B or C). Same root cause as patch #38
+          (penalties.py), different source file. Single-line change, no
+          functional difference.
+
   # ---------------------------------------------------------------------------
   # Phase F: Attention
   # ---------------------------------------------------------------------------
@@ -1763,15 +1794,22 @@ packages:
   llamacpp:
     repo: "https://github.com/ggml-org/llama.cpp.git"
     branch: "master"
-    commit: "6f4f53f2b7da54fcdbbecaaa734337c337ad6176"
+    commit: "a4107133a634250c8c9d888bc0bc8520dcfd6105"
     src_dir: "llama.cpp"
     shallow: false
+    clean_generated: true
     method: cmake
     phase: I
     steps: [33]
     depends_on: [therock]
     compiler: amdclang
     skip_marker: null
+    skip_check:
+      type: file_exists
+      path: "llama.cpp/build-rocm/llama-server"
+      paths:
+        - "llama.cpp/build-vulkan/llama-server"
+        - "llama.cpp/build-cpu/llama-server"
     backends:
       rocm:
         install_dir: "${LLAMACPP_SRC}/build-rocm"
@@ -1844,6 +1882,88 @@ packages:
           Cherry-pick PR #21003: increase grammar repetition threshold from
           2000 to 50000 default, configurable via LLAMA_GRAMMAR_MAX_REPS envvar.
           Fixes parse errors with large tool-calling grammars (e.g. OpenClaw).
+
+      # 4. Hybrid/Recurrent Checkpoint & Cache Restore Fix (BUILD-FIXES #164).
+      # Backports mike07026's engine-layer fixes (commits 5418233, e05ffb0,
+      # 51de10c, 65e06f8, f9c9a19) for Gated DeltaNet models (Qwen3.6, etc.).
+      # Fixes: forced full prompt re-processing (#22746), crashes at n_parallel>1
+      # (#20176, #23322), checkpoint invalidation (#24055).
+      # 8 patch files — adapted to our base (SRV_TRC logging, message_spans API).
+
+      # 4a. Public C API: recurrent expand/shrink + clear_checkpoint.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-llama-api.patch"
+        description: >-
+          C API in include/llama.h: llama_memory_recurrent_expand/shrink,
+          llama_context_recurrent_expand/shrink, and
+          llama_context_recurrent_clear_checkpoint.
+
+      # 4b. Context-level: resize_recurrent_memory + clear_recurrent_checkpoint.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-llama-context.patch"
+        description: >-
+          llama_context::resize_recurrent_memory() and clear_recurrent_checkpoint()
+          in llama-context.cpp + llama-context.h. dynamic_cast chain to find
+          recurrent component (recurrent → hybrid → hybrid_iswa).
+
+      # 4c. Core recurrent memory: expand/shrink/resize + cell_zero + checkpoint.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-memory-recurrent.patch"
+        description: >-
+          llama-memory-recurrent.cpp + .h: expand/shrink/resize with
+          checkpoint save/restore, cell_zero (full field clearing + R/S tensor
+          zeroing), cell_zero_snapshots, cell_copy_primary_to_snapshots,
+          seq_rm tail invalidation, seq_cp rs_idx assert, state_read snapshot
+          copy, s_copy size_t cast, find_slot fresh-cell snapshot zeroing.
+
+      # 4d. Hybrid memory: seq_rm fallback + seq_pos_min + PARTIAL_ONLY.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-memory-hybrid.patch"
+        description: >-
+          llama-memory-hybrid.cpp: seq_rm falls back to cell_zero on recurrent
+          failure instead of returning false. seq_pos_min returns attention-only
+          (not max of attn+recr). PARTIAL_ONLY already upstream for hybrid.
+
+      # 4e. Hybrid ISWA memory: same fixes as 4d.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-memory-hybrid-iswa.patch"
+        description: >-
+          llama-memory-hybrid-iswa.cpp: seq_rm fallback, seq_pos_min fix,
+          state_write/read with PARTIAL_ONLY flag (skip attention when set).
+
+      # 4f. Graph builder: zero ALL snapshot planes in build_rs.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-llama-graph.patch"
+        description: >-
+          llama-graph.cpp: build_rs() now zeros all snapshot planes of rs_zero
+          cell (primary + snapshots), not just the primary row. Prevents
+          cross-sequence state leakage via s_copy with rs_idx > 0.
+
+      # 4g. MTP speculative: zero pending_h at conversation start.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-speculative.patch"
+        description: >-
+          speculative.cpp: zero pending_h carry-over vector at begin() of MTP
+          draft. Prevents stale embedding from previous conversation leaking
+          into the first process() call of a new conversation.
+
+      # 4h. Server integration: shrink/expand, checkpoint restore, anchor-tracking.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-server.patch"
+        description: >-
+          server-context.cpp: recurrent shrink/expand around prompt cache,
+          clear_checkpoint after cache load, checkpoint restore path for
+          n_swa==0 hybrid models, checkpoint pruning by n_past_prefix,
+          anchor-tracking checkpoint strategy, PARTIAL_ONLY for draft state,
+          send_error null-safe, prompt.checkpoints.clear().
+
+      # 4i. Server task: draft prompt-cache load flags fix.
+      - type: patch
+        path: "${VLLM_DIR}/patches/hybrid-attn-server-task.patch"
+        description: >-
+          server-task.cpp: fix draft prompt-cache load to use
+          PARTIAL_ONLY flag matching prompt_save, preventing
+          state serialization layout mismatch for hybrid draft models.
 
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"

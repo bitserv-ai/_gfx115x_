@@ -1,0 +1,394 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index bb3b91ab5..8c3dd5a64 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -223,7 +223,7 @@ struct server_slot {
+         GGML_ASSERT(prompt.data.size() == 0);
+ 
+         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+-        const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
++        const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) : 0;
+ 
+         const size_t cur_size = cur_size_tgt + cur_size_dft;
+ 
+@@ -237,7 +237,7 @@ struct server_slot {
+ 
+         llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+         if (ctx_dft) {
+-            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
++            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+         }
+ 
+         return true;
+@@ -264,6 +264,8 @@ struct server_slot {
+             common_context_seq_rm(ctx_dft, id, -1, -1);
+         }
+ 
++        // Clear context checkpoints together with the prompt.
++        prompt.checkpoints.clear();
+         prompt.tokens.clear();
+     }
+ 
+@@ -929,6 +931,11 @@ private:
+     // Necessary similarity of prompt for slot selection
+     float slot_prompt_similarity = 0.0f;
+ 
++    // hybrid/recurrent models need re-evaluation of accepted tokens after
++    // rejecting draft tokens, because the recurrent state cannot be rolled back
++    bool needs_reeval = false;
++    int  n_parallel_user = 0;
++
+     std::string model_name; // name of the loaded model, to be used by API
+     std::set<std::string> model_aliases; // additional names for the model
+     std::set<std::string> model_tags;    // informational tags
+@@ -1171,6 +1178,9 @@ private:
+ 
+         vocab = llama_model_get_vocab(model_tgt);
+ 
++        needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
++        n_parallel_user = params_base.n_parallel;
++
+         n_ctx = llama_n_ctx(ctx_tgt);
+ 
+         add_bos_token = llama_vocab_get_add_bos(vocab);
+@@ -1412,6 +1422,32 @@ private:
+         }
+         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
+ 
++        // Auto-disable context checkpoints on AMD GPUs (issue #20176),
++        // unless the model is recurrent/hybrid — those need checkpoints
++        // to avoid forced full prompt re-processing on every turn.
++        if (params_base.n_ctx_checkpoints > 0) {
++            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
++                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
++                if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
++                    continue;
++                }
++                std::string name = ggml_backend_dev_name(dev);
++                if (name.find("AMD") != std::string::npos ||
++                    name.find("Radeon") != std::string::npos ||
++                    name.find("ROCm") != std::string::npos) {
++                    if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
++                        SRV_WRN("AMD GPU detected (%s) — keeping checkpoints enabled for recurrent model\n",
++                                name.c_str());
++                    } else {
++                        SRV_WRN("AMD GPU detected (%s) — disabling context checkpoints (issue #20176)\n",
++                                name.c_str());
++                        params_base.n_ctx_checkpoints = 0;
++                    }
++                    break;
++                }
++            }
++        }
++
+         if (params_base.n_ctx_checkpoints > 0) {
+             SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
+                     params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
+@@ -1583,6 +1619,66 @@ private:
+         return nullptr;
+     }
+ 
++    // Shrink recurrent state to 1 cell before saving/loading prompt cache.
++    bool recurrent_shrink_for_prompt_cache() {
++        if (!needs_reeval) {
++            return true;
++        }
++
++        if (llama_context_recurrent_shrink(ctx_tgt, 1)) {
++            SRV_TRC("%s", "shrunk recurrent state to 1 cell for prompt cache\n");
++            return true;
++        }
++
++        SRV_ERR("failed to shrink recurrent state (%s)\n", "prompt cache");
++        return false;
++    }
++
++    // Expand recurrent state back after prompt cache save/load completes.
++    bool recurrent_expand_after_prompt_cache() {
++        if (!needs_reeval) {
++            return true;
++        }
++
++        if (llama_context_recurrent_expand(ctx_tgt, n_parallel_user)) {
++            SRV_TRC("expanded recurrent state to %d cells after prompt cache\n", n_parallel_user);
++            return true;
++        }
++
++        SRV_ERR("failed to expand recurrent state (%s)\n", "prompt cache");
++        return false;
++    }
++
++    // Shrink/expand the shared recurrent pool only when no slot is decoding.
++    bool recurrent_shrink_safe_for_prompt_cache() const {
++        if (!needs_reeval) {
++            return true;
++        }
++        for (const server_slot & slot : slots) {
++            if (slot.is_processing()) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    // Ensures expand() runs if shrink() was performed, even on early return.
++    struct recurrent_pool_guard {
++        server_context_impl * impl = nullptr;
++        bool                shrunk = false;
++
++        recurrent_pool_guard(server_context_impl * impl, bool shrunk)
++            : impl(impl), shrunk(shrunk) {}
++
++        ~recurrent_pool_guard() {
++            if (shrunk && impl && !impl->recurrent_expand_after_prompt_cache()) {
++                SRV_ERR("%s", "CRITICAL: failed to expand recurrent pool during cleanup\n");
++            }
++        }
++
++        void release() { shrunk = false; }
++    };
++
+     server_slot * get_available_slot(const server_task & task) {
+         server_slot * ret = nullptr;
+ 
+@@ -1668,24 +1764,74 @@ private:
+         }
+ 
+         if (ret) {
++            // Force prompt cache update for recurrent models to shrink/restore
++            // the recurrent state and avoid forced re-processing (issue #22746).
++            if (needs_reeval && prompt_cache) {
++                update_cache = true;
++            }
++
+             update_cache = update_cache && prompt_cache;
+ 
+             // cache prompts only for completion tasks
+             update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+ 
+             if (update_cache) {
++                bool did_shrink = false;
++
++                // Only shrink for slot 0: in the shrunk pool (size=1), only
++                // seq_id 0 is in-bounds and prompt_load() can rewrite its
++                // recurrent state.  For ret->id != 0 the recurrent state
++                // cannot be loaded (seq_id >= size), so shrinking would
++                // leave the slot with stale recurrent state after expand.
++                // Running prompt_save/prompt_load against the full-size
++                // pool for non-zero slots is correct (no memory savings,
++                // but no data loss).
++                if (ret->id == 0 && recurrent_shrink_safe_for_prompt_cache()) {
++                    if (recurrent_shrink_for_prompt_cache()) {
++                        did_shrink = true;
++                    } else {
++                        SRV_WRN("%s", "recurrent shrink failed - continuing prompt cache update without shrink\n");
++                    }
++                } else if (ret->id != 0) {
++                    SRV_TRC("skipping recurrent shrink for prompt cache - slot %d is out of bounds in shrunk pool\n", ret->id);
++                } else {
++                    SRV_TRC("%s", "skipping recurrent shrink for prompt cache - other slots are active\n");
++                }
++
++                recurrent_pool_guard recr_guard(this, did_shrink);
++
+                 SRV_TRC("%s", "updating prompt cache\n");
+ 
+                 const int64_t t_start = ggml_time_us();
+ 
+                 ret->prompt_save(*prompt_cache);
+ 
+-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
+-                    ret->prompt_clear(false);
++                const bool load_ok = ret->prompt_load(*prompt_cache, task.tokens);
++
++                // Remove the reloaded slot's entry from the checkpoint backup
++                // so expand()'s restore_checkpoint() doesn't overwrite it with
++                // stale pre-shrink data.  When shrink was skipped (ret->id != 0
++                // or other slots active), recr_checkpoint_cells is empty and
++                // this is a no-op.
++                if (load_ok) {
++                    llama_context_recurrent_checkpoint_remove_seq(ctx_tgt, ret->id);
+                 }
+ 
+                 prompt_cache->update();
+ 
++                // Expand before prompt_clear so seq_rm is not called while size == 1.
++                if (did_shrink) {
++                    if (!recurrent_expand_after_prompt_cache()) {
++                        SRV_ERR("%s", "recurrent expand failed after prompt cache update\n");
++                        return nullptr;
++                    }
++                    recr_guard.release();
++                }
++
++                if (!load_ok) {
++                    ret->prompt_clear(false);
++                }
++
+                 SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+             }
+         }
+@@ -2052,7 +2198,11 @@ private:
+     }
+ 
+     void send_error(const server_slot & slot, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER) {
+-        send_error(slot.task->id, error, type, slot.task->n_tokens(), slot.n_ctx);
++        // slot.task may be null if the slot was released mid-processing
++        send_error(slot.task ? slot.task->id : -1,
++                   error, type,
++                   slot.task ? slot.task->n_tokens() : 0,
++                   slot.n_ctx);
+     }
+ 
+     void send_error(const int id_task, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER, const int32_t n_prompt_tokens = 0, const int32_t n_ctx = 0) {
+@@ -3244,12 +3394,18 @@ private:
+ 
+                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
+ 
++                            // Save the prefix-match boundary before any checkpoint
++                            // restore adjusts n_past/pos_next downward.
++                            const int32_t n_past_prefix = n_past;
++
+                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
+                             const bool has_new_tokens = (n_past < slot.task->n_tokens());
+ 
+                             // the largest pos_min required for a checkpoint to be useful
+                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
+ 
++                            bool std_restored_or_reset = false;
++
+                             if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
+                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                                 if (pos_min == -1) {
+@@ -3301,6 +3457,7 @@ private:
+                                 }
+ 
+                                 if (pos_min >= pos_min_thold) {
++                                    std_restored_or_reset = true;
+                                     // search for a context checkpoint
+                                     const auto it = std::find_if(
+                                         slot.prompt.checkpoints.rbegin(),
+@@ -3340,16 +3497,59 @@ private:
+                             }
+ 
+                             {
+-                                // erase any checkpoints with pos_max > pos_next
++                                // Prune checkpoints from a prior conversation.
++                                // Those with pos_max > n_past_prefix were created after
++                                // the prefix diverges — discard only those.
+                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
+-                                    const auto & cur = *it;
+-                                    if (cur.pos_max > pos_next) {
+-                                        SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
++                                    if (it->pos_max > n_past_prefix) {
++                                        SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
++                                                it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
+                                         it = slot.prompt.checkpoints.erase(it);
+                                     } else {
+                                         ++it;
+                                     }
+                                 }
++
++                                // When there is no prefix match with any prior conversation,
++                                // clear all remaining checkpoints to prevent stale restore on
++                                // a later request that happens to share a prefix (e.g. same
++                                // system prompt).  The pruning loop above only removes
++                                // checkpoints with pos_max > 0; a checkpoint at pos_max == 0
++                                // would survive and could be incorrectly restored later.
++                                if (n_past_prefix == 0) {
++                                    slot.prompt.checkpoints.clear();
++                                }
++                            }
++
++                            // Recurrent/hybrid models: restore recurrent state from checkpoint.
++                            // For n_swa == 0 the pos_min vs pos_min_thold guard never fires,
++                            // so we bypass it and directly restore recurrent state.
++                            // Gate on n_past_prefix > 0 to prevent restoring an old checkpoint
++                            // from a previous conversation into an unrelated new request.
++                            if (needs_reeval && n_swa == 0 && n_past_prefix > 0 && !std_restored_or_reset && !slot.prompt.checkpoints.empty()) {
++                                const auto it = std::find_if(
++                                    slot.prompt.checkpoints.rbegin(),
++                                    slot.prompt.checkpoints.rend(),
++                                    [&](const auto & cur) {
++                                        return cur.pos_max <= pos_next;
++                                    }
++                                );
++
++                                if (it != slot.prompt.checkpoints.rend()) {
++                                    const auto & ckpt = *it;
++
++                                    ckpt.load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++                                    ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++                                    common_speculative_set_state(spec.get(), slot.id, ckpt.data_spec);
++
++                                    SLT_WRN(slot, "restored recurrent state from context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", pos_next = %d, size = %.3f MiB)\n",
++                                            ckpt.pos_min, ckpt.pos_max, ckpt.n_tokens, pos_next, (float) ckpt.size() / 1024 / 1024);
++
++                                    n_past   = ckpt.pos_max + 1;
++                                    pos_next = slot.prompt.tokens.pos_next(n_past);
++                                    SLT_WRN(slot, "adjusted n_past to checkpoint pos_max + 1 (%d): %d tokens will be re-evaluated\n",
++                                            (int)(ckpt.pos_max + 1), (int)(pos_next - n_past));
++                                }
+                             }
+                         }
+ 
+@@ -3461,7 +3661,6 @@ private:
+                     }
+ 
+                     const auto & spans = slot.task->params.message_spans;
+-                    const auto last_user_pos = spans.last_user_message_pos();
+ 
+                     // add prompt tokens for processing in the current batch
+                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+@@ -3525,7 +3724,6 @@ private:
+                     const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
+ 
+                     const bool is_user_start = spans.is_user_start(n_tokens_start);
+-                    const bool is_last_user_message = n_tokens_start == last_user_pos;
+ 
+                     // entire prompt has been processed
+                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
+@@ -3560,8 +3758,40 @@ private:
+                     // do not checkpoint after mtmd chunks
+                     do_checkpoint = do_checkpoint && !has_mtmd;
+ 
+-                    // no need to create checkpoints that are too close together, unless it's the last user message
+-                    do_checkpoint = do_checkpoint && (slot.prompt.checkpoints.empty() || is_last_user_message || n_tokens_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
++                    // Anchor-tracking checkpoint strategy for all model types.
++                    //
++                    //   [anchor] ... ... [tracking]   tracking moves forward
++                    //   When tracking >= min_step from anchor -> freeze it,
++                    //   start a new tracking point.  Otherwise keep sliding.
++                    //
++                    // Only slide when a checkpoint would be allowed at this
++                    // position (do_checkpoint reflects has_mtmd, mid-prompt,
++                    // and pos_min gating above).  Sliding at a disallowed
++                    // position would overwrite an existing checkpoint with
++                    // state from a position the gates explicitly excluded.
++                    if (do_checkpoint) {
++                        const int64_t min_step = params_base.checkpoint_min_step;
++                        const size_t  n        = slot.prompt.checkpoints.size();
++
++                        if (n >= 2) {
++                            auto       ri  = slot.prompt.checkpoints.rbegin();
++                            const auto ref = (++ri)->n_tokens;
++
++                            const int64_t d1 = n_tokens_start - ref;
++                            const int64_t d2 =
++                                slot.prompt.checkpoints.back().n_tokens - ref;
++
++                            if (d1 < min_step && d2 < min_step) {
++                                // Still too close — replace back() in-place.
++                                auto & cur = slot.prompt.checkpoints.back();
++                                cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
++                                cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++                                if (ctx_dft) cur.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++                                common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
++                                do_checkpoint = false;
++                            }
++                        }
++                    }
+                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
+ 
+                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not

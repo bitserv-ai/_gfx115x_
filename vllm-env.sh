@@ -417,6 +417,14 @@ unset _LLAMACPP_ROCM _LLAMACPP_VULKAN
 # Virtual Environment Activation
 # =============================================================================
 
+# Ensure bundled Python C extensions can find their system libs (ssl, hashlib,
+# blake2, bz2, lzma, sqlite3, etc.) on any Linux distro.
+_LOCAL_LIB="${VLLM_DIR}/local/lib"
+if [[ -d "${_LOCAL_LIB}" ]]; then
+    export LD_LIBRARY_PATH="${_LOCAL_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+unset _LOCAL_LIB
+
 if [[ -d "${VLLM_VENV}" ]]; then
     # shellcheck source=/dev/null
     source "${VLLM_VENV}/bin/activate"

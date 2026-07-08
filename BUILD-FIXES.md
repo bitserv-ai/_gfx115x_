@@ -3244,3 +3244,725 @@ paths replaced (rocprofiler-sdk moved under rocm-systems/projects/).
 
 Kept (still needed): TheRock T16/T17 (yaml-cpp/elfio NEW path),
 T15 (atomic_codegen), PyTorch P15b (HIPBlas.h SFINAE).
+
+### 157. llama.cpp pin bump to b9873 for DFlash fixes
+
+**Symptom:** Pinned commit `6f4f53f2` (b9842, 2026-06-29) predates
+several critical DFlash stability and performance fixes that landed
+in the subsequent 31 commits.
+
+**Root cause:** The 5-day gap between b9842 and b9873 includes three
+DFlash-related fixes and one GDN MTP optimisation that are directly
+relevant to our workload:
+
+- DFlash p-min guard (b9867)
+- DFlash KV-Injection assertion guard (b9873, PR #25215, AMD-authored
+  by liminfei-amd) — prevents `GGML_ASSERT` abort when the K/V
+  rotation buffer is unallocated
+- GDN MTP copy optimisation (b9862)
+- Post-revert scheduler stability (b9843, following the b9820
+  regression)
+
+**Fix:** Re-pinned `vllm-packages.yaml` commit from
+`6f4f53f2b7da54fcdbbecaaa734337c337ad6176` to
+`a4107133a634250c8c9d888bc0bc8520dcfd6105` (b9873, 2026-07-04).
+
+Pre-flight validation against the new tree confirmed both
+llama.cpp patches still apply cleanly and are not yet upstream:
+- `cmake-zen4-only.patch` (CMakeLists.txt)
+- `grammar-max-rep-threshold.patch` (PR #21003 cherry-pick)
+
+Regression risk: low — 5-day delta, 31 commits, no breaking API
+changes in the backend build system.
+
+### 158. Lemonade v10.9.0 web UI shows "not installed" for custom-path backends
+
+**Symptom:** After upgrading to Lemonade v10.9.0, the web UI displays
+"not installed" and "..." for all three custom-built llama.cpp backends
+(ROCm, Vulkan, CPU), even though the API (`/api/v1/system-info`) reports
+`state: "installed"` for each. A trash-can / "uninstall backend" button
+is shown alongside the "not installed" label — a contradictory state.
+
+**Root cause:** Lemonade v10.9.0 commit `05ce2ed6` ("refactor:
+self-describing WrappedServer backends") changed backend version
+detection to read `version.txt` from Lemonade's own install directory
+(`get_install_directory()` in `backend_utils.cpp:292-298`), not from
+the custom binary path configured via `*_bin` in `config.json`.
+
+`get_installed_version_file()` (`backend_utils.cpp:387-408`) resolves to
+`~/.cache/lemonade/bin/llamacpp/<backend>/version.txt` (where `<backend>`
+is `rocm-stable`, `vulkan`, or `cpu`). Our build script writes
+`version.txt` to the build directories (`/opt/src/vllm/llama.cpp/build-
+{rocm,vulkan,cpu}/version.txt`), not to Lemonade's cache directories.
+
+Since the expected `version.txt` files do not exist,
+`installed_version` comes back empty. The API omits the `version` field
+entirely (guarded by `if (!installed_version.empty() && installed_version
+!= "unknown")`). The web UI frontend interprets the missing version as
+"not installed" and displays "..." in the version column.
+
+The binary itself is found correctly (via `find_external_backend_binary()`
+which reads the `*_bin` config keys), so `state` is `"installed"` — but
+the version display is broken.
+
+**Fix:** In `build-vllm.sh` Step 35 (`validate_lemonade`), after building
+the backends, create `version.txt` files in Lemonade's expected cache
+directories with the llama.cpp version tag (e.g. `b9842`):
+
+```
+~/.cache/lemonade/bin/llamacpp/rocm-stable/version.txt
+~/.cache/lemonade/bin/llamacpp/vulkan/version.txt
+~/.cache/lemonade/bin/llamacpp/cpu/version.txt
+```
+
+The version string is read from the build directory's `version.txt`
+(written at Step 33, line 4886). This is idempotent — running Step 35
+multiple times overwrites with the same content.
+
+**Result:** All three backends now show `version: "b9842"` in the API
+and display correctly as "installed" with their version in the web UI.
+
+**Note:** An earlier attempt to fix this by injecting `ROCM_PATH` into
+`lemonade.env` and setting `no_fetch_executables=true` was reverted —
+`ROCM_PATH` pointing at the build prefix (`/opt/src/vllm/local`) caused
+a WebSocket reconnect loop in the Lemonade server.
+
+### 159. TRITON_ATTN `make_tensor_descriptor` AttributeError on Triton 3.0.0
+
+**Symptom:** vLLM crashes on first inference request with
+`kv_cache_dtype=int8_per_token_head`:
+
+```
+AttributeError: module 'triton.language' has no attribute 'make_tensor_descriptor'
+EngineDeadError: EngineCore encountered an issue.
+```
+
+**Root cause:** `triton_unified_attention.py` defines three `@triton.jit`
+helper functions (`_load_q_td`, `_load_kv_tile_td`, `_store_output_td`)
+that call `tl.make_tensor_descriptor()`. These are Intel XPU-only
+(`USE_TD=False` on CUDA/ROCm — auto-selected only on XPU), but Triton's
+JIT compiler parses the entire AST before constexpr branch pruning. When
+the AST visitor encounters `tl.make_tensor_descriptor`, it calls
+`getattr(triton.language, 'make_tensor_descriptor')` which raises
+`AttributeError` on Triton 3.0.0 (`main_perf @ 0ec280cf`).
+
+`make_tensor_descriptor` was added to Triton upstream in 3.3.x as
+`_experimental_make_tensor_descriptor` and stabilized as
+`make_tensor_descriptor` in 3.4+.
+
+FLA ops (`vllm/model_executor/layers/fla/ops/op.py`) already handle this
+with a local stub fallback (upstream PR #37088/#38981). However,
+`triton_unified_attention.py` calls `tl.make_tensor_descriptor` directly
+and was never patched — the same fix was not applied to this module.
+
+The crash only manifests when TRITON_ATTN is selected as the decoder
+attention backend. This happens when `int8_per_token_head` KV-cache dtype
+is used: `ROCM_ATTN` does not list `int8_per_token_head` in its
+`supported_kv_cache_dtypes`, so vLLM falls through to `TRITON_ATTN` which
+does support it. With `auto` (bf16) KV-cache, `ROCM_ATTN` is selected and
+`TRITON_ATTN` is never triggered — the crash is invisible.
+
+**Fix:** Resolve `make_tensor_descriptor` at module level in
+`triton_unified_attention.py` with a fallback stub, mirroring the FLA ops
+pattern from `fla/ops/op.py`. Three call sites (`_load_q_td`,
+`_load_kv_tile_td`, `_store_output_td`) are updated from
+`tl.make_tensor_descriptor(...)` to `_make_tensor_descriptor(...)`. If
+`tl.make_tensor_descriptor` or `tl._experimental_make_tensor_descriptor`
+exists, use the real function; otherwise define a `@triton.jit` stub that
+returns `None`. Since `USE_TD=False` on ROCm, the stub is never executed
+at runtime — it only satisfies the AST visitor. Dead code is eliminated
+by constexpr pruning after AST parsing succeeds.
+
+**Impact:** Enables `int8_per_token_head` KV-cache dtype with TRITON_ATTN
+on Triton 3.0.0. No runtime overhead — stub is dead code on CUDA/ROCm.
+
+**Upstream:** No open PR. FLA ops fix was merged via #37088/#38981 but
+the same pattern was never applied to `triton_unified_attention.py`.
+
+### 160. Hybrid/recurrent models force full prompt re-processing on every turn
+
+**Symptom:** Gated DeltaNet models (Qwen3.6, Qwen3.5) use a hybrid
+architecture where ~75% of layers maintain a recurrent state. After
+commit `e98cb51` ("server: fix checkpoints creation", PR #22929),
+context checkpoints are always invalidated on hybrid/recurrent models
+because the checkpoint validation logic checks for SWA cache data
+(`n_swa`), which is 0 for these models. The server log shows:
+
+```
+forcing full prompt re-processing due to lack of cache data
+  (likely due to SWA or hybrid/recurrent memory)
+erased invalidated context checkpoint (n_swa = 0, pos_next = 0)
+```
+
+At 38K context this means 207 seconds of prefill per agent turn,
+making multi-turn agent use impossible. Additionally, context
+checkpoints crash AMD GPUs (issue #20176), forcing
+`--ctx-checkpoints 0` which makes re-processing even worse.
+
+MTP acceptance also suffers (issue #23322) because the corrupted
+recurrent state degrades speculative decoding quality.
+
+**Root cause:** The recurrent state (per-sequence gateway/normalisation
+tensors in `r_l`/`s_l`) is allocated for `n_parallel` slots. When the
+prompt cache saves/restores KV cache for a different slot count, the
+recurrent state dimensions don't match, causing the checkpoint
+validation to fail and trigger full re-processing.
+
+The upstream `llama_memory_recurrent` class has no resize mechanism —
+it allocates tensors once at context creation and never resizes them.
+BeeLlama (Anbeeld/beellama.cpp) implemented `recurrent_shrink`/
+`recurrent_expand` as a workaround, but this was never merged into
+mainline.
+
+**Fix:** Backport PR #24785 (Moltes94) — 4 patch files in
+`${VLLM_DIR}/patches/`:
+
+1. **`hybrid-attn-llama-api.patch`** (`include/llama.h`): New public
+   C API: `llama_memory_recurrent_expand/shrink`,
+   `llama_context_recurrent_expand/shrink`.
+
+2. **`hybrid-attn-llama-context.patch`** (`src/llama-context.{cpp,h}`):
+   `llama_context::resize_recurrent_memory()` — `dynamic_cast` chain
+   (recurrent → hybrid → hybrid_iswa) to locate the recurrent
+   component, then call `expand()`/`shrink()`, invalidate scheduler
+   and graph cache. C API wrapper functions.
+
+3. **`hybrid-attn-memory-recurrent.patch`**
+   (`src/llama-memory-recurrent.{cpp,h}`): Core `expand()`/`shrink()`/
+   `resize()` methods. `resize()` reallocates `r_l`/`s_l` tensors with
+   new dimensions, copies existing data, resizes cells, updates
+   `head`/`n`/`used` counters.
+
+4. **`hybrid-attn-server.patch`** (`tools/server/server-context.cpp`):
+   Server integration — `recurrent_shrink_for_prompt_cache()` shrinks
+   to 1 cell before `prompt_cache->update()`,
+   `recurrent_expand_after_prompt_cache()` restores to `n_parallel`
+   cells after. Auto-detects AMD GPUs and disables context checkpoints
+   on non-recurrent models (issue #20176); recurrent models keep
+   checkpoints enabled. Adapted to use `SRV_TRC` (not `SRV_INF` from
+   the original PR, which was renamed in our tree).
+
+**Result:** Zero re-processing across consecutive agent turns on
+hybrid/recurrent models. Tested by PR author: 5 consecutive turns
+at 24K context on RX 7900 XTX, zero re-processing, MTP acceptance
+46-100%. Also fixes #24055 (checkpoint invalidation), #20176 (AMD
+checkpoint crashes), #23322 (MTP acceptance degradation).
+
+**Upstream:** PR #24785 is open but not merged. ggerganov review
+pending. The `recurrent_shrink/expand` API is a custom backport —
+if upstream merges a different fix, these patches must be reviewed
+and potentially replaced.
+
+### 161. Stale vLLM wheel installed after Python-only patch changes
+
+**Symptom:** vLLM crashes on first inference request with
+`kv_cache_dtype=int8_per_token_head`:
+
+```
+AttributeError: module 'triton.language' has no attribute 'make_tensor_descriptor'
+```
+
+even though the `triton-attn-td-stub.patch` (#159) was applied to the
+source tree and the build completed successfully (all 5 smoke tests
+PASS).
+
+**Root cause:** The build pipeline has a two-stage flow for vLLM:
+
+1. **Step 20** (`patch_vllm_gfx1151`): `apply_patches vllm` applies all
+   YAML-registered patches to the source tree
+   (`${VLLM_SRC}/vllm/...`).
+2. **Step 24** (`build_vllm`): `pip wheel .` builds a wheel from the
+   patched source, then `uv pip install --force-reinstall` installs it
+   into the venv.
+
+`should_skip_step vllm` uses an `import`-type check (`import torch;
+import vllm; assert torch.cuda.is_available()`). If vLLM is importable,
+Step 24 is skipped entirely — no wheel build, no `uv pip install`. The
+old wheel (from a previous build, before the patch was added) remains
+installed in the venv.
+
+In this case, the wheel from 2026-07-02 (pre-patch) was still
+installed, while the source tree and a newer wheel from 2026-07-06
+(containing the patch) existed but were never installed. The smoke
+test passed because it uses `SmolLM2-135M` without
+`int8_per_token_head`, so the `TRITON_ATTN` path was never exercised.
+
+The MD5 comparison confirmed the discrepancy:
+- Source tree: `bb2274b8...` (patched)
+- Wheel (2026-07-06): `bb2274b8...` (patched)
+- venv site-packages: `8a054ea9...` (unpatched, from 2026-07-02 wheel)
+
+**Fix:** Two-layer guard in `build-vllm.sh`:
+
+1. **Patch-hash check** (`apply_patches` + `build_vllm`):
+   `apply_patches()` now computes an MD5 hash over all `type: patch`
+   files referenced in the YAML for each package and writes it to
+   `${VLLM_DIR}/.patch-hash-<pkg_key>`. `build_vllm()` compares this
+   hash against `${VLLM_DIR}/.patch-hash-built-vllm` (saved after each
+   successful build). If the hashes differ, the skip is bypassed and
+   the wheel is rebuilt + reinstalled.
+
+2. **Post-install verification** (`build_vllm`):
+   After `uv pip install --force-reinstall`, the MD5 of a key patched
+   Python file (`triton_unified_attention.py`) is compared between the
+   source tree and the installed site-packages. If they differ, the
+   wheel is reinstalled once. If the second install still fails, an
+   `error`-level message is printed requesting manual intervention.
+
+The patch-hash is computed over the patch files themselves (not the
+patched source files) to avoid false positives from upstream commits
+that touch the same files.
+
+**Scope:** Currently implemented only for vLLM (`build_vllm`). The
+`apply_patches` hash is written for all packages, but the skip-bypass
+check is vLLM-specific. Extending to other packages is straightforward
+if needed.
+
+**Quick fix (no rebuild needed):** The existing wheel from 2026-07-06
+already contains the patch. Running `uv pip install --force-reinstall
+--no-deps <wheel>` is sufficient — the pipeline fix prevents this from
+recurring on future builds.
+
+### 162. TRITON_ATTN chained `or` operators in attention helpers
+
+**Symptom:** After deploying the patched vLLM wheel (#159, #161), the
+`make_tensor_descriptor` AttributeError is gone, but a new crash occurs
+on first inference request with `kv_cache_dtype=int8_per_token_head`:
+
+```
+triton.compiler.errors.UnsupportedLanguageConstruct: at 44:7:
+    if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+       ^
+chained boolean operators (A or B or C) are not supported; use parentheses to split the chain.
+```
+
+The error is wrapped in `CompilationError: at 203:43` at the
+`compute_tile_loop_bounds(...)` call site in `triton_unified_attention.py`.
+
+**Root cause:** Triton `main_perf` (0ec280cf, effectively 3.7.x code —
+`__version__` string is stale and reports `3.0.0`) supports nested
+`@triton.jit` helper-function calls via `call_JitFunction` inlining
+(`code_generator.py:1050`). However, its AST-to-TTIR compiler rejects
+chained boolean operators (`A or B or C`) without explicit parentheses.
+The helper function `compute_tile_loop_bounds` in
+`triton_attention_helpers.py:185` contains a 3-way `or` chain. When the
+`TRITON_ATTN` backend is selected (required for `int8_per_token_head`
+KV-cache, since `ROCM_ATTN` only supports fp8 variants), the helper is
+inlined into the `kernel_unified_attention` kernel and the compiler
+raises `UnsupportedLanguageConstruct`.
+
+This is the same root cause as #135 (patch #38, `penalties.py`), but in
+a different source file (`triton_attention_helpers.py`). Both patches
+are needed — 1 patch file per source file per patch policy.
+
+**Fix:** `triton-attn-chained-bool.patch` (YAML #42) — add parentheses
+to the 3-way `or` chain:
+
+```python
+# Before:
+if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+
+# After:
+if USE_MM_PREFIX or (USE_PER_SEQ_CAUSAL or (not USE_CAUSAL)):
+```
+
+Single-line change, no functional difference. Python boolean `or` is
+left-associative and short-circuiting in both forms.
+
+### 163. Lemonade TheRock version-gate mismatch with self-built ROCm
+
+**Symptom**: Lemonade v10.9.0 downloads its own TheRock ROCm 7.13.0
+(~2 GB) despite a self-built TheRock 7.15.0 already installed at
+`/opt/src/vllm/local/`.
+
+**Root cause**: `will_install_therock()` in `backend_manager.cpp`
+calls `has_matching_system_rocm_runtime()` which reads the expected
+version from `backend_versions.json` (`therock.version`) and compares
+it against the system ROCm version found via `resolve_rocm_root()`.
+With `ROCM_PATH=/opt/src/vllm/local` set (explicit selection,
+`resolved_explicitly=true`), only a `major.minor` match is required.
+But 7.15 (installed) ≠ 7.13 (expected) → gate fails → download
+triggered.
+
+Lemonade reads `backend_versions.json` from its **build** resource
+directory (`build/resources/`), not the source tree. Patching only
+the source copy is insufficient.
+
+**Fix**: Patch `backend_versions.json` in both locations:
+- `src/cpp/resources/backend_versions.json` (source)
+- `build/resources/backend_versions.json` (build — the copy `lemond`
+  reads at runtime)
+
+Change `"version": "7.13.0"` → `"version": "7.15.0"`. After patch,
+`has_matching_system_rocm_runtime()` returns true,
+`will_install_therock()` returns false, download skipped.
+
+Additionally, systemd override env vars enable `resolve_rocm_root()`
+to find our TheRock:
+- `ROCM_PATH=/opt/src/vllm/local` — explicit ROCm root selection
+  (priority 1 in `resolve_rocm_root()`, sets `resolved_explicitly=true`)
+- `HSA_OVERRIDE_GFX_VERSION=11.5.1` — gfx1151 arch override (not set
+  by Lemonade, must be provided externally)
+- `LD_LIBRARY_PATH=/opt/src/vllm/local/lib` — passed through to
+  `llama-server` subprocess as `existing_LD_LIBRARY_PATH`
+
+**Note**: `backend_versions.json` is a build artifact copied from
+`src/cpp/resources/` during cmake configure. On next Lemonade rebuild,
+the source patch ensures the build copy is regenerated correctly.
+Both files must be patched when editing without a rebuild.
+
+### 164. Hybrid/Recurrent Checkpoint & Cache Restore Fix (llamacpp/4-11)
+
+**Symptom**: Two crashes at `n_parallel > 1` on hybrid GDN models
+(Qwen3.6-27B/35B):
+
+1. `GGML_ASSERT(empty_cell.is_empty())` in `find_slot`
+   (`llama-memory-recurrent.cpp:584`) — stale `seq_id` after
+   shrink/expand cycle leaves cell non-empty.
+2. `GGML_ABORT` in `common_context_seq_rm` (`common.cpp:1504`) —
+   `expand()` placed after error handler, never reached on
+   `prompt_load` failure.
+
+Also: forced full prompt re-processing on every multi-turn request
+(207s prefill at 38K context) due to `pos_min` conflation in hybrid
+`seq_pos_min` (recurrent `pos_min == pos_max == current position` →
+`max(attn, recr)` inflates `pos_min` → checkpoint search always fails
+→ `do_reset = true`).
+
+**Root cause**: Patch #160 (PR #24785) implemented shrink/expand but
+was missing 9 critical pieces:
+
+1. No `cell_zero()` — stale `seq_id` after shrink/expand → Crash 1
+2. No `clear_checkpoint()` — expand overwrites loaded state with stale data
+3. No checkpoint save/restore — recurrent state lost during shrink/expand
+4. No `seq_rm` tail invalidation — dangling tail pointers → find_slot crash
+5. `expand()` after error handler — never reached on failure → Crash 2
+6. No `seq_pos_min()` fix — hybrid `pos_min` still conflated → forced re-processing
+7. No `PARTIAL_ONLY` for hybrid — checkpoints serialize full state (too large)
+8. No `build_rs` snapshot zeroing — stale snapshot data → cross-sequence leakage
+9. No recurrent checkpoint restore path — `n_swa==0` models never restore recurrent state
+
+**Fix**: Backport mike07026's engine-layer fixes (commits `5418233`,
+`e05ffb0`, `51de10c`, `65e06f8`, `f9c9a19`) as 8 `.patch` files,
+replacing the 4 files from #160. Adapts log levels (`SRV_TRC` vs
+`SRV_INF`, logs v2 #25078) and checkpoint API (`message_spans` vs
+`n_before_user`, newer #24176) to our base (`a4107133a`, 109 commits
+ahead of mike07026's base `23ee8797e`).
+
+8 patch files:
+
+| # | Patch file | Source file(s) | Key changes |
+|---|-----------|----------------|-------------|
+| 1 | `hybrid-attn-llama-api.patch` | `include/llama.h` | C API: expand/shrink + clear_checkpoint |
+| 2 | `hybrid-attn-llama-context.patch` | `llama-context.cpp/h` | resize_recurrent_memory + clear_recurrent_checkpoint |
+| 3 | `hybrid-attn-memory-recurrent.patch` | `llama-memory-recurrent.cpp/h` | cell_zero, checkpoint save/restore, seq_rm tail invalidation, plane-interleaved resize, state_read snapshot copy, find_slot fresh-cell zeroing |
+| 4 | `hybrid-attn-memory-hybrid.patch` | `llama-memory-hybrid.cpp` | seq_rm fallback to cell_zero, seq_pos_min attn-only |
+| 5 | `hybrid-attn-memory-hybrid-iswa.patch` | `llama-memory-hybrid-iswa.cpp` | Same as #4 for ISWA + PARTIAL_ONLY state_write/read |
+| 6 | `hybrid-attn-llama-graph.patch` | `llama-graph.cpp` | build_rs zeros ALL snapshot planes (primary + snapshots) |
+| 7 | `hybrid-attn-speculative.patch` | `speculative.cpp` | pending_h zeroing at MTP begin() |
+| 8 | `hybrid-attn-server.patch` | `server-context.cpp` | shrink/expand around prompt cache, clear_checkpoint after cache load, recurrent checkpoint restore for n_swa==0, anchor-tracking checkpoint strategy, PARTIAL_ONLY for draft state, send_error null-safe, prompt.checkpoints.clear() |
+
+**MTP fixes deferred**: Commits `1e07292` (GDN shift-register ssm_states),
+`d777736` (GDN shift-register conv_state), `5e0d940` (MTP premature EOS),
+`76077c4`/`a7ae6c8` (Leviathan probabilistic acceptance) — deferred until
+engine stability verified.
+
+**Supersedes**: #160 (4 patch files → 8 patch files, same root cause
+expanded with complete fix).
+
+**Upstream**: mike07026's fork (`fix_20260629`), not yet PR'd as a
+complete set. PR #24785 (shrink/expand) is open. PR #24797
+(`seq_pos_min`) was rejected by ggerganov but the concept is
+reimplemented here with checkpoint-restore path addressing ggerganov's
+objection. PR #24891 (hakuhan) has complementary items evaluated in
+Phase 2.
+
+### 165. llamacpp `--force-rebuild` ignored — hardcoded binary check bypasses `should_skip_step`
+
+**Symptom:** Running `./build-vllm.sh --step 33 --force-rebuild llamacpp`
+resets the source tree (via `clean_generated`) and checks out the pinned
+commit, but then prints "All llama.cpp backends already built
+(ROCm+Vulkan+CPU)" and exits without rebuilding or applying patches. The
+new hybrid-attn patches (#164) are never applied; stale binaries remain.
+
+**Root cause:** Step 33 (`build_llamacpp()`) used a hardcoded binary
+existence check (`[[ -x .../llama-server ]]` × 3 backends) instead of
+calling `should_skip_step llamacpp`. The `--force-rebuild` CLI flag
+works by checking `FORCE_REBUILD_PKGS` inside `should_skip_step()` (line
+996-1004), so bypassing that function means `--force-rebuild llamacpp`
+has no effect on Step 33. Additionally, the YAML `skip_check` section was
+absent for `llamacpp`, so even if `should_skip_step` were called, it
+would return "don't skip" (no check configured → `return 1`).
+
+**Fix:** Two changes:
+
+1. **YAML**: Added `skip_check` section to `llamacpp` package with
+   `type: file_exists`, checking all 3 backend binaries (rocm + vulkan +
+   cpu) via `path` + `paths`.
+
+2. **build-vllm.sh**: Replaced the hardcoded `if [[ -x ... ]]` block
+   (line 4974-4978) with `if should_skip_step llamacpp; then`. This
+   routes through the standard skip-check mechanism, which respects
+   `--force-rebuild llamacpp` and properly cleans/rebuilds when
+   requested.
+
+**Supersedes**: The old inline binary check (unnumbered, pre-#165).
+
+### 166. Hybrid/recurrent shrink/expand lifecycle: race condition, ignored return, expand-before-clear (llamacpp)
+
+**Symptom**: External review of the #164 patch set identified four
+blocking/high-severity issues in the prompt-cache shrink/expand path
+(`get_available_slot` → `recurrent_shrink_for_prompt_cache` →
+`recurrent_expand_after_prompt_cache`) that can crash or corrupt state
+at `n_parallel > 1`:
+
+1. **B2 (CRITICAL)**: `recurrent_shrink_for_prompt_cache()` shrinks the
+   **shared** recurrent pool to 1 cell with no check that other slots
+   are idle. With `n_parallel=4` + `kv_unified=true`, a cache update
+   while other slots decode breaks `find_slot` for `seq_id >= 1`.
+2. **B3 (HIGH)**: Return value of `recurrent_shrink_for_prompt_cache()`
+   is discarded. On failure, execution continues with a saved checkpoint
+   and inconsistent pool state.
+3. **B4 (CRITICAL)**: If `recurrent_expand_after_prompt_cache()` fails,
+   `get_available_slot` returns `nullptr` but the global pool remains at
+   `size=1`. All subsequent decode for `seq_id >= 1` fails until restart.
+4. **B1 (HIGH)**: `prompt_clear(false)` is called while pool is at
+   `size=1` (before `expand`). For hybrid models the hybrid `seq_rm`
+   layer catches the recurrent failure (no `GGML_ABORT`), but the
+   recurrent state for `seq_id >= 1` remains un-garbage-collected
+   (`cell_zero` is a no-op on `seq_id >= size`), producing an
+   attn/recr state mismatch.
+
+**Root cause**: The shrink/expand lifecycle in `get_available_slot`
+(#164) lacked safety guards: no concurrency check, no return-value
+verification, no RAII for expand, and wrong ordering of `prompt_clear`
+relative to `expand`.
+
+**Fix**: Merged into `hybrid-attn-server.patch` (1 .patch-File = 1
+Quelldatei). Four additions to `server-context.cpp`:
+
+| Fix | Addresses | Change |
+|-----|-----------|--------|
+| `recurrent_shrink_safe_for_prompt_cache()` | B2 | `const` method; iterates `slots`, returns `false` if any slot `is_processing()`. Shrink skipped when unsafe. |
+| `recurrent_pool_guard` RAII | B4 | Destructor calls `recurrent_expand_after_prompt_cache()` if `shrunk=true`. Covers early return and exception paths. |
+| Shrink return-value check | B3 | `SRV_WRN` + continue without shrink on failure. |
+| Expand before `prompt_clear` | B1 | `prompt_clear` deferred until after expand; checkpoint cleared only when shrink occurred. |
+
+**Patch file**: `hybrid-attn-server.patch` (348 lines, was 290).
+
+**Review**: External review in `workdoc/review/result1/review-result.md`.
+Internal examination in `workdoc/review/result1/review-examination.md`.
+B1 severity corrected from CRITICAL (review) to HIGH (internal): hybrid
+`seq_rm` catches recurrent failure, no `GGML_ABORT`. L6 from review
+removed (factual error: recurrent restore path is outside `n_past > 0`
+block).
+
+**Open followup (L4)**: Standard checkpoint restore (`pos_min >=
+pos_min_thold`) and recurrent restore (`n_swa == 0`) can both fire,
+producing conflicting `n_past`. 1-line guard to skip standard restore
+when recurrent path fires. Not yet implemented.
+
+### 167. Hybrid/recurrent checkpoint: clear_checkpoint data corruption, cell_zero shared-cell crash, anchor-tracking gating (llamacpp)
+
+**Symptom**: External review #2 (separate reviewer) identified three
+issues in the #164 patch set (post B1-B4 fix from #166):
+
+1. **B1-R2 (CRITICAL)**: `clear_checkpoint()` before `expand()` in
+   `get_available_slot` destroys the **entire** pre-shrink backup.
+   `restore_checkpoint()` in `expand()` then hits
+   `recr_checkpoint_cells.empty()` and is a no-op. Net effect: all
+   cells except cell 0 are left zeroed after expand — every other
+   slot's GDN state is silently destroyed. No crash, no error, no log.
+   Not addressed by #166's `recurrent_shrink_safe_for_prompt_cache()`
+   because idle slots still have persistent recurrent state in the
+   pool.
+
+2. **B2-R2 (HIGH)**: `cell_zero()` clears `cells[cell_idx].seq_id`
+   (ALL seq_ids for that cell) but only resets `cells[seq_id].tail`
+   for the calling seq_id. If the cell is shared via `seq_cp()`,
+   other seq_ids' tail pointers are left dangling. Next `find_slot()`
+   for a sibling seq_id hits `GGML_ASSERT(cell.has_seq_id(seq_id))`
+   → crash.
+
+3. **L1-R2 (MEDIUM-HIGH)**: Anchor-tracking checkpoint block runs as
+   a bare scope without checking `do_checkpoint` as entry condition.
+   Even when `do_checkpoint = false` (mid-prompt, `has_mtmd`,
+   `pos_min < 0`), the block can mutate the most recent checkpoint's
+   serialized state in-place — overwriting it with data from a
+   position the surrounding gates explicitly excluded.
+
+**Root cause**: Three independent bugs in the #164 patch set:
+
+1. The `clear_checkpoint()` call was added to prevent expand from
+   overwriting "stale data from before the cache update." But the
+   cache update (prompt_save/prompt_load) does NOT modify recurrent
+   state — for seq_id >= 1 no cell exists in the shrunk pool; for
+   seq_id == 0 it is a save→load round-trip with identical data.
+   The pre-shrink checkpoint IS the correct state. Clearing it
+   defeats the entire purpose of the checkpoint mechanism.
+   **Correction (review #2 fix verification)**: The above analysis was
+   **wrong**. `prompt_load()` DOES modify recurrent state for
+   `ret->id == 0` (via `state_read()` → `seq_rm` → `find_slot`).
+   Simply removing `clear_checkpoint()` caused `restore_checkpoint()`
+   to overwrite the freshly loaded cell 0 with stale backup data.
+   Fixed by making the restore selective: remove only the reloaded
+   slot's entry from `recr_checkpoint_cells` before `expand()`.
+
+2. `cell_zero()` was adapted from `seq_rm()`'s full-clear path but
+   missed the multi-owner tail reset. `seq_rm()`'s full-clear iterates
+   all seq_ids and resets tails individually; `cell_zero()` took a
+   shortcut by only resetting the calling seq_id.
+
+3. The anchor-tracking block was added as a replacement for the old
+   `is_last_user_message || n_tokens_start > back().n_tokens +
+   min_step` check. The old code was inside the `do_checkpoint &&
+   (...)` expression, so it inherited the gating. The new bare scope
+   broke that inheritance.
+
+**Fix**: Three changes, merged into existing patch files (1 .patch-File
+= 1 Quelldatei):
+
+| Fix | Addresses | File | Change |
+|-----|-----------|------|--------|
+| Selective checkpoint restore | B1-R2 | `hybrid-attn-server.patch` + `hybrid-attn-llama-api.patch` + `hybrid-attn-llama-context.patch` + `hybrid-attn-memory-recurrent.patch` | New API `llama_context_recurrent_checkpoint_remove_seq(ctx, seq_id)`. After `prompt_load()` succeeds, removes the reloaded slot's entry from `recr_checkpoint_cells` so `restore_checkpoint()` during `expand()` restores all OTHER slots but skips the just-reloaded one. |
+| `cell_zero()` multi-owner tail reset | B2-R2 | `hybrid-attn-memory-recurrent.patch` | Before `seq_id.clear()`, iterate all seq_ids in the cell and reset `cells[other].tail = -1` for each owner. |
+| Anchor-tracking `if (do_checkpoint)` guard | L1-R2 | `hybrid-attn-server.patch` | Replace bare scope `{ ... }` with `if (do_checkpoint) { ... }`. Block only runs when a checkpoint would be allowed. |
+
+**Patch files**: `hybrid-attn-llama-api.patch` (34 lines, was 30),
+`hybrid-attn-llama-context.patch` (166 lines, was 150),
+`hybrid-attn-memory-recurrent.patch` (686 lines, was 676),
+`hybrid-attn-server.patch` (358 lines, was 355).
+
+**Review**: External review #2 in
+`workdoc/review1/result2/review-result.md`. All three findings verified
+correct against applied source. Fix verification in
+`workdoc/review1/result2/review-result-2.md`: Fix 2 and Fix 3 verified
+correct; Fix 1 required a follow-up (selective checkpoint restore
+instead of unconditional removal of `clear_checkpoint()`). Follow-up
+fix applied and verified.
+
+**Additional findings from review #2 and fix verification (tracked, not yet fixed)**:
+
+- **L2-R2 (MEDIUM)**: `send_error` null-safe check is either dead code
+  or incomplete (dozens of other `slot.task->` dereferences nearby).
+- **L3-R2 (MEDIUM)**: MTP `set_state` is a no-op — checkpoint restore
+  doesn't roll back `pending_h`. Deferred to Phase 3 (MTP fixes).
+- **L4 (confirmed by fix verification)**: Double checkpoint restore
+  path — standard + recurrent can both fire after context-shift on
+  `n_swa == 0` models. Not corruption, but wasted work / suboptimal
+  checkpoint selection. 1-line guard.
+- **N1-R2 (LOW-MEDIUM)**: `ctx_dft` PARTIAL_ONLY write/read flag
+  asymmetry — only matters if draft model is itself hybrid.
+- **Fix 3 minor (LOW)**: 1→2 checkpoint transition has no `min_step`
+  spacing gate. One extra close checkpoint per conversation, not
+  accumulating.
+- **Fix 2 related (LOW-MEDIUM, pre-existing)**: `seq_rm(seq_id=-1,
+  p0, p1)` generic remove-all-sequences branch has same dangling-tail
+  pattern as original B2-R2. Pre-existing base code, not introduced
+  by these patches.
+- **E2-R2 (LOW-MEDIUM)**: Failed expand causes silent infinite retry
+  instead of client-visible error.
+- **E3-R2 (LOW)**: `cell_copy_primary_to_snapshots` skipped for
+  full-context restores (`seq_id == -1`).
+- **E4-R2 (LOW/informational)**: Snapshot-plane fixes are inert for
+  `n_rs_seq=0` (Qwen3.6 default). Future-proofing only.
+
+### 168. Hybrid/recurrent checkpoint: non-zero slot data loss, tail rebuild, zero-prefix restore guard, double-restore guard, draft flags, cell_zero bookkeeping, shrink failure cleanup (llamacpp)
+
+**Symptom**: External review #3 (third independent reviewer) and an
+internal subagent end-to-end trace identified seven issues in the
+#164/#166/#167 patch set:
+
+1. **Subagent (HIGH)**: `checkpoint_remove_seq(ret->id)` for
+   `ret->id != 0` after shrink → recurrent state data loss. In the
+   shrunk pool (size=1), only seq_id 0 is in-bounds. For non-zero
+   slots, `prompt_load()` is a vacuous success (0 recurrent cells
+   loaded), but the checkpoint entry is deleted → cell left empty
+   after expand → attn/recr mismatch. Affects ~75% of slot assignments.
+
+2. **B1-R3 (CRITICAL for shared cells)**: `restore_checkpoint()` does
+   not rebuild per-owner `cells[seq_id].tail` pointers from restored
+   membership sets. If a cell is shared via `seq_cp()`, sibling
+   seq_ids' tail pointers are left dangling after restore →
+   `find_slot()` crash.
+
+3. **B2-R3 (HIGH)**: Recurrent checkpoint restore can fire with zero
+   prompt prefix match (`n_past_prefix == 0`), restoring an old
+   checkpoint from a previous conversation into an unrelated new
+   request.
+
+4. **B3-R3 (HIGH)**: Standard and recurrent checkpoint restore paths
+   can both fire in the same iteration. If standard path sets
+   `do_reset = true` (force full reprocess), recurrent path undoes
+   that by restoring an old checkpoint. Even when both "succeed",
+   they can select different checkpoints and produce conflicting state.
+
+5. **B5-R3 (HIGH, inert for current draft model)**: Draft prompt-cache
+   save uses `PARTIAL_ONLY`, but load uses flags `0`. For hybrid draft
+   memory, reader expects more data than was written. Inert for plain
+   KV cache draft models (ignores flag).
+
+6. **L3-R3 (LOW)**: `cell_zero()` does not decrement `used`. All other
+   clear paths do. Self-healing via `find_slot()` recomputation.
+
+7. **L5-R3 (LOW-MEDIUM)**: If `shrink()` calls `save_checkpoint()` then
+   `resize()` fails, the checkpoint remains populated. A later no-op
+   `expand()` calls `restore_checkpoint()`, overwriting live changes.
+
+**Root cause**: Seven independent issues spanning the #164 patch set
+and the #167 follow-up. The `checkpoint_remove_seq` mechanism (#167)
+was too aggressive for non-zero slots. The `restore_checkpoint()`
+implementation did not account for shared cells. The server checkpoint
+logic had two independent restore paths that could conflict. The draft
+prompt-cache load path had a pre-existing flag mismatch.
+
+**Fix**: Nine changes across 3 patches (2 existing + 1 new), updated
+after fix verification by reviewers #2 and #3:
+
+| Fix | Addresses | File | Change |
+|-----|-----------|------|--------|
+| Shrink skip for non-zero slots | Subagent + Rev#2 + Rev#3 | `hybrid-attn-server.patch` | Only shrink when `ret->id == 0`; for non-zero slots, prompt_save/load runs against full-size pool (no memory savings but correct recurrent state) |
+| Tail rebuild in `restore_checkpoint` | B1-R3 | `hybrid-attn-memory-recurrent.patch` | After restore loop, rebuild all `cells[sid].tail` from membership sets |
+| `n_past_prefix > 0` gate | B2-R3 | `hybrid-attn-server.patch` | Prevent recurrent restore when no prefix match with prior conversation |
+| Clear checkpoints at zero prefix | B2-R3 (follow-up) | `hybrid-attn-server.patch` | `slot.prompt.checkpoints.clear()` when `n_past_prefix == 0` to prevent stale restore on later requests |
+| Double-restore guard | B3-R3 | `hybrid-attn-server.patch` | Track `std_restored_or_reset`, skip recurrent path when standard path fired |
+| Draft flags fix | B5-R3 | **NEW** `hybrid-attn-server-task.patch` | Load with `PARTIAL_ONLY` to match save |
+| `cell_zero` decrement `used` | L3-R3 | `hybrid-attn-memory-recurrent.patch` | Decrement `used` if cell was non-empty before clearing |
+| Clear checkpoint on shrink failure | L5-R3 | `hybrid-attn-memory-recurrent.patch` | `clear_checkpoint()` if `resize()` fails in `shrink()` |
+| `checkpoint_remove_seq` after load | Rev#2 fix-verif | `hybrid-attn-server.patch` | Remove reloaded slot's checkpoint entry after successful `prompt_load()`; no-op when shrink was skipped |
+
+**Evolution**: Initial #168 had `checkpoint_remove_seq` guarded by
+`ret->id == 0`. Fix verification by reviewers #2 and #3 found this
+still leaves an attn/recr mismatch for non-zero slots (old recurrent
+restored + new attention loaded). Revised fix: skip shrink entirely
+for `ret->id != 0`, so prompt_load runs against the full pool and
+correctly writes recurrent state. `checkpoint_remove_seq` is now
+unconditional (`if (load_ok)`) — it's a no-op when no checkpoint was
+saved (shrink skipped).
+
+**Patch files**: `hybrid-attn-server.patch` (394 lines, was 358),
+`hybrid-attn-memory-recurrent.patch` (707 lines, was 686),
+**NEW** `hybrid-attn-server-task.patch` (14 lines).
+
+**Review**: External review #3 in `workdoc/review2/review-result.md`.
+Fix verification by reviewer #3 in `workdoc/review2/review3-fv-prompt.md`
+(7 fixes verified: 5 correct, 2 revised per reviewer feedback). Fix
+verification by reviewer #2 in `workdoc/review1/review2-fv2-prompt.md`.
+Internal subagent trace (8 lifecycle paths). All findings verified.
+
+**YAML**: New entry #51 for `hybrid-attn-server-task.patch`.
+
+**Tracked issues from review #3 (not yet fixed)**:
+
+- **B4-R3 (HIGH)**: Partial truncation (`n_rs_seq=0`) destroys recurrent
+  state during MTP speculative rollback. Deferred to Phase 3.
+- **L1-R3 (MED-HIGH)**: MTP `pending_h` not saved/restored. Phase 3.
+- **L2-R3 (MEDIUM)**: `seq_pos_max()` returns -1 after `cell_zero()`
+  while attention KV remains. After B4.
+- **L4-R3 (LOW-MED)**: `cell_zero()` resets `rs_idx` only for caller
+  on shared cells. When `n_rs_seq > 0`.
+- **L6-R3 (LOW-MED)**: `send_error` null-safety incomplete.
+- **E1-R3 (LOW)**: Full-context restore skips snapshot planes.
+  When `n_rs_seq > 0`.
+- **E2-R3 (MEDIUM)**: Expand failure → poor recovery state.
+- **E3-R3 (LOW)**: Prompt-cache update forced when shrink unsafe.

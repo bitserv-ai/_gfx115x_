@@ -44,4 +44,6 @@ Thumbs.db
 # bitserv-ai internal (not for publication)
 testing/
 techdoc/
+workdoc/
+deploy/
 TODO.md

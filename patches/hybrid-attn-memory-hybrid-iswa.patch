@@ -1,0 +1,56 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/src/llama-memory-hybrid-iswa.cpp b/src/llama-memory-hybrid-iswa.cpp
+index c7d4bcd41..f102ee73d 100644
+--- a/src/llama-memory-hybrid-iswa.cpp
++++ b/src/llama-memory-hybrid-iswa.cpp
+@@ -146,10 +146,15 @@ void llama_memory_hybrid_iswa::clear(bool data) {
+ }
+ 
+ bool llama_memory_hybrid_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+-    // Try removing from the recurrent cache first since it may fail. If it does
+-    // fail, the cache will not have been mutated.
+-    if (!mem_recr->seq_rm(seq_id, p0, p1)) {
+-        return false;
++    // Try removing from the recurrent cache first since it may fail.
++    // For partial truncations (p0 > 0), recurrent rollback requires snapshot
++    // data that may not be available (e.g. after shrink+expand for prompt cache).
++    // In that case, zero out the stale recurrent state to avoid warmup effects,
++    // then remove from attention cache.
++    bool recr_ok = mem_recr->seq_rm(seq_id, p0, p1);
++    if (!recr_ok) {
++        mem_recr->cell_zero(seq_id);
++        return mem_attn->seq_rm(seq_id, p0, p1);
+     }
+     return mem_attn->seq_rm(seq_id, p0, p1);
+ }
+@@ -175,8 +180,9 @@ void llama_memory_hybrid_iswa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_
+ }
+ 
+ llama_pos llama_memory_hybrid_iswa::seq_pos_min(llama_seq_id seq_id) const {
+-    // the min of the total cache is the max of the two caches' min values
+-    return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
++    // return only the attention cache's minimum position
++    // recurrent cache has one cell per sequence, so its pos_min == pos_max == current state position
++    return mem_attn->seq_pos_min(seq_id);
+ }
+ 
+ llama_pos llama_memory_hybrid_iswa::seq_pos_max(llama_seq_id seq_id) const {
+@@ -193,12 +199,16 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid_iswa::memory_br
+ }
+ 
+ void llama_memory_hybrid_iswa::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+-    mem_attn->state_write(io, seq_id, flags);
++    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
++        mem_attn->state_write(io, seq_id, flags);
++    }
+     mem_recr->state_write(io, seq_id, flags);
+ }
+ 
+ void llama_memory_hybrid_iswa::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+-    mem_attn->state_read(io, seq_id, flags);
++    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
++        mem_attn->state_read(io, seq_id, flags);
++    }
+     mem_recr->state_read(io, seq_id, flags);
+ }
+ 

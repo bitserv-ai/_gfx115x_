@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/v1/attention/ops/triton_attention_helpers.py b/vllm/v1/attention/ops/triton_attention_helpers.py
+index ed9a38ad6..99dc1a889 100644
+--- a/vllm/v1/attention/ops/triton_attention_helpers.py
++++ b/vllm/v1/attention/ops/triton_attention_helpers.py
+@@ -182,7 +182,7 @@ def compute_tile_loop_bounds(
+         + (BLOCK_M - 1) // num_queries_per_kv
+         + 1
+     )
+-    if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
++    if USE_MM_PREFIX or (USE_PER_SEQ_CAUSAL or (not USE_CAUSAL)):
+         # Non-causal or mixed batches need the full sequence range.
+         # Per-element masking in compute_kv_seq_mask handles the
+         # actual causal/non-causal boundary per sequence.
