@@ -1,9 +1,17 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index bb3b91ab5..8c3dd5a64 100644
+index bb3b91ab5..e54286afb 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -223,7 +223,7 @@ struct server_slot {
+@@ -173,6 +173,7 @@ struct server_slot {
+ 
+     llama_tokens spec_draft;
+     llama_tokens spec_prompt;
++    std::vector<float>   spec_draft_probs;
+     std::vector<int32_t> spec_i_batch;
+     common_prompt_checkpoint spec_ckpt;
+ 
+@@ -223,7 +224,7 @@ struct server_slot {
          GGML_ASSERT(prompt.data.size() == 0);
  
          const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
@@ -12,7 +20,7 @@ index bb3b91ab5..8c3dd5a64 100644
  
          const size_t cur_size = cur_size_tgt + cur_size_dft;
  
-@@ -237,7 +237,7 @@ struct server_slot {
+@@ -237,7 +238,7 @@ struct server_slot {
  
          llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
          if (ctx_dft) {
@@ -21,7 +29,7 @@ index bb3b91ab5..8c3dd5a64 100644
          }
  
          return true;
-@@ -264,6 +264,8 @@ struct server_slot {
+@@ -264,6 +265,8 @@ struct server_slot {
              common_context_seq_rm(ctx_dft, id, -1, -1);
          }
  
@@ -30,7 +38,15 @@ index bb3b91ab5..8c3dd5a64 100644
          prompt.tokens.clear();
      }
  
-@@ -929,6 +931,11 @@ private:
+@@ -312,6 +315,7 @@ struct server_slot {
+ 
+         if (can_speculate()) {
+             spec_draft.clear();
++            spec_draft_probs.clear();
+             spec_i_batch.clear();
+             spec_ckpt.clear();
+         }
+@@ -929,6 +933,11 @@ private:
      // Necessary similarity of prompt for slot selection
      float slot_prompt_similarity = 0.0f;
  
@@ -42,7 +58,7 @@ index bb3b91ab5..8c3dd5a64 100644
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
      std::set<std::string> model_tags;    // informational tags
-@@ -1171,6 +1178,9 @@ private:
+@@ -1171,6 +1180,9 @@ private:
  
          vocab = llama_model_get_vocab(model_tgt);
  
@@ -52,7 +68,7 @@ index bb3b91ab5..8c3dd5a64 100644
          n_ctx = llama_n_ctx(ctx_tgt);
  
          add_bos_token = llama_vocab_get_add_bos(vocab);
-@@ -1412,6 +1422,32 @@ private:
+@@ -1412,6 +1424,32 @@ private:
          }
          SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
  
@@ -85,7 +101,7 @@ index bb3b91ab5..8c3dd5a64 100644
          if (params_base.n_ctx_checkpoints > 0) {
              SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
                      params_base.n_ctx_checkpoints, params_base.checkpoint_min_step);
-@@ -1583,6 +1619,66 @@ private:
+@@ -1583,6 +1621,66 @@ private:
          return nullptr;
      }
  
@@ -152,7 +168,7 @@ index bb3b91ab5..8c3dd5a64 100644
      server_slot * get_available_slot(const server_task & task) {
          server_slot * ret = nullptr;
  
-@@ -1668,24 +1764,74 @@ private:
+@@ -1668,24 +1766,74 @@ private:
          }
  
          if (ret) {
@@ -229,7 +245,7 @@ index bb3b91ab5..8c3dd5a64 100644
                  SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
          }
-@@ -2052,7 +2198,11 @@ private:
+@@ -2052,7 +2200,11 @@ private:
      }
  
      void send_error(const server_slot & slot, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER) {
@@ -242,7 +258,30 @@ index bb3b91ab5..8c3dd5a64 100644
      }
  
      void send_error(const int id_task, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER, const int32_t n_prompt_tokens = 0, const int32_t n_ctx = 0) {
-@@ -3244,12 +3394,18 @@ private:
+@@ -2976,14 +3128,16 @@ private:
+                         }
+ 
+                         slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
++                        slot.spec_draft_probs.clear();
+ 
+                         common_speculative_get_draft_params(spec.get(), slot.id) = {
+-                            /* .drafting = */ true,
+-                            /* .n_max    = */ n_draft_max,
+-                            /* .n_past   = */ slot.prompt.n_tokens(),
+-                            /* .id_last  = */ slot.sampled,
+-                            /* .prompt   = */ &slot.spec_prompt,
+-                            /* .result   = */ &slot.spec_draft,
++                            /* .drafting   = */ true,
++                            /* .n_max      = */ n_draft_max,
++                            /* .n_past     = */ slot.prompt.n_tokens(),
++                            /* .id_last    = */ slot.sampled,
++                            /* .prompt     = */ &slot.spec_prompt,
++                            /* .result     = */ &slot.spec_draft,
++                            /* .draft_probs= */ &slot.spec_draft_probs,
+                         };
+ 
+                         drafting.push_back(&slot);
+@@ -3244,12 +3398,18 @@ private:
  
                              llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
  
@@ -261,7 +300,7 @@ index bb3b91ab5..8c3dd5a64 100644
                              if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                  const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                  if (pos_min == -1) {
-@@ -3301,6 +3457,7 @@ private:
+@@ -3301,6 +3461,7 @@ private:
                                  }
  
                                  if (pos_min >= pos_min_thold) {
@@ -269,7 +308,7 @@ index bb3b91ab5..8c3dd5a64 100644
                                      // search for a context checkpoint
                                      const auto it = std::find_if(
                                          slot.prompt.checkpoints.rbegin(),
-@@ -3340,16 +3497,59 @@ private:
+@@ -3340,16 +3501,59 @@ private:
                              }
  
                              {
@@ -333,7 +372,24 @@ index bb3b91ab5..8c3dd5a64 100644
                              }
                          }
  
-@@ -3461,7 +3661,6 @@ private:
+@@ -3422,10 +3626,15 @@ private:
+                     // - the model does not support partial sequence removal
+                     // - the model uses SWA (and we are not using `swa_full`)
+                     // - the model supports partial sequence removal but only up to a fixed bound
++                    // - the model is recurrent/hybrid (needs_reeval): the cell_zero()
++                    //   fallback in llama_memory_hybrid::seq_rm() makes seq_rm_type
++                    //   report PART, but the recurrent state is zeroed on partial
++                    //   truncation, so checkpoints are needed to save/restore it
+                     do_checkpoint = do_checkpoint && (
+                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+-                            n_swa > 0);
++                            n_swa > 0 ||
++                            needs_reeval);
+ 
+                     bool has_mtmd = false;
+ 
+@@ -3461,7 +3670,6 @@ private:
                      }
  
                      const auto & spans = slot.task->params.message_spans;
@@ -341,7 +397,7 @@ index bb3b91ab5..8c3dd5a64 100644
  
                      // add prompt tokens for processing in the current batch
                      while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
-@@ -3525,7 +3724,6 @@ private:
+@@ -3525,7 +3733,6 @@ private:
                      const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
  
                      const bool is_user_start = spans.is_user_start(n_tokens_start);
@@ -349,7 +405,7 @@ index bb3b91ab5..8c3dd5a64 100644
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
-@@ -3560,8 +3758,40 @@ private:
+@@ -3560,8 +3767,40 @@ private:
                      // do not checkpoint after mtmd chunks
                      do_checkpoint = do_checkpoint && !has_mtmd;
  
@@ -392,3 +448,94 @@ index bb3b91ab5..8c3dd5a64 100644
                      SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
  
                      // note: we create the checkpoint before calling llama_decode(), so the current batch is not
+@@ -3833,11 +4072,22 @@ private:
+ 
+             // verify and try to accept the draft
+             {
+-                // save the sampler sampler state in case we need to restore it
+-                common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
+-
++                // Token-matching speculative verification on a throwaway clone.
++                // The clone runs the full sampler chain (including dist RNG,
++                // penalties, reasoning budget) and is discarded afterward.
++                // The original slot.smpl state is NOT mutated during
++                // verification — only after committed tokens are replayed.
+                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
+-                auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
++
++                const bool has_probs = slot.spec_draft_probs.size() == n_draft;
++                auto accepted = common_sampler_sample_and_accept_n_prob(
++                        slot.smpl.get(),
++                        slot.ctx_tgt,
++                        slot.spec_i_batch,
++                        slot.spec_draft,
++                        has_probs ? &slot.spec_draft_probs : nullptr,
++                        common_sampler_get_seed(slot.smpl.get()));
++
+                 slot.spec_i_batch.clear();
+ 
+                 GGML_ASSERT(accepted.size() >= 1);
+@@ -3857,6 +4107,11 @@ private:
+ 
+                         // partial acceptance is not supported by the context -> truncate the draft and restore the state
+                         slot.spec_draft = std::move(accepted);
++                        // accepted includes the bonus/recovery token which has no draft prob entry.
++                        // keep only the entries that correspond to actual draft positions.
++                        if (slot.spec_draft_probs.size() > slot.spec_draft.size() - 1) {
++                            slot.spec_draft_probs.resize(slot.spec_draft.size() - 1);
++                        }
+ 
+                         const auto & ckpt = slot.spec_ckpt;
+ 
+@@ -3875,12 +4130,36 @@ private:
+                         }
+ 
+                         slot.prompt.tokens.keep_first(ckpt.n_tokens);
+-                        slot.smpl = std::move(smpl_save);
+ 
+                         return;
+                     }
+                 }
+ 
++                // Replay committed tokens into the original sampler.
++                // The throwaway clone consumed RNG draws and mutated its
++                // own penalty/reasoning-budget state during verification;
++                // we replay the committed tokens on the original to
++                // advance the original's penalty/repetition state.
++                for (size_t j = 0; j < accepted.size(); j++) {
++                    common_sampler_accept(slot.smpl.get(), accepted[j], true);
++                }
++
++                // Advance the dist sampler's RNG by accepted.size() draws
++                // to match the MTP-off RNG position (one draw per decoded
++                // token).  The throwaway clone consumed its own RNG draws;
++                // the original's RNG is still at the pre-verify position.
++                {
++                    auto * chain = common_sampler_get(slot.smpl.get());
++                    llama_token_data dummy[2] = {{0, 0.0f, 0.0f}, {1, 0.0f, 0.0f}};
++                    llama_token_data_array dummy_arr = {dummy, 2, 0, false};
++                    for (size_t j = 0; j < accepted.size(); j++) {
++                        dummy_arr.data[0].logit = 1.0f;
++                        dummy_arr.data[1].logit = 0.0f;
++                        dummy_arr.selected = -1;
++                        llama_sampler_apply(chain, &dummy_arr);
++                    }
++                }
++
+                 if (trace > 0) {
+                     SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
+                 }
+@@ -3888,6 +4167,13 @@ private:
+                 common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
+ 
+                 slot.spec_draft = std::move(accepted);
++                // Keep spec_draft_probs aligned: the accepted tokens include
++                // draft tokens (which have probs) and possibly a bonus token
++                // (which has no prob — the last element of accepted is the
++                // bonus or recovered token, not a draft).
++                if (slot.spec_draft_probs.size() > slot.spec_draft.size() - 1) {
++                    slot.spec_draft_probs.resize(slot.spec_draft.size() - 1);
++                }
+             }
+ 
+             const int64_t t_now = ggml_time_us();

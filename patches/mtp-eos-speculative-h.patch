@@ -1,0 +1,26 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/common/speculative.h b/common/speculative.h
+index c58fac3cc..8a0183f26 100644
+--- a/common/speculative.h
++++ b/common/speculative.h
+@@ -3,6 +3,8 @@
+ #include "llama.h"
+ #include "common.h"
+ 
++#include <vector>
++
+ struct common_speculative;
+ 
+ // comma separated list the provided types
+@@ -46,6 +48,11 @@ struct common_speculative_draft_params {
+ 
+     // the generated draft from the last _draft() call
+     llama_tokens * result;
++
++    // per-draft probabilities for speculative verification.
++    // Populated by the draft implementation for use by
++    // common_sampler_sample_and_accept_n_prob.
++    std::vector<float> * draft_probs = nullptr;
+ };
+ 
+ common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);

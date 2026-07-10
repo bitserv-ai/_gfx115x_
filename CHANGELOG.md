@@ -11,120 +11,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **llama.cpp b9842 → b9873**: DFlash p-min guard, KV-Injection
-  assertion guard (PR #25215, AMD-authored), GDN MTP copy
-  optimisation, post-revert scheduler stability. Both build patches
-  revalidated against the new tree. (BUILD-FIXES #157)
-- **Hybrid attention patches #160 → #164**: Replaced 4 patch files
-  (shrink/expand only) with 8 patch files backporting mike07026's
-  engine-layer fixes (commits `5418233`, `e05ffb0`, `51de10c`,
-  `65e06f8`, `f9c9a19`). Adds `cell_zero()` with full field clearing
-  + R/S tensor zeroing, checkpoint save/restore around shrink/expand,
-  `seq_pos_min` hybrid fix (attn-only), `seq_rm` fallback to
-  `cell_zero`, `PARTIAL_ONLY` for hybrid state write/read, `build_rs`
-  snapshot plane zeroing, anchor-tracking checkpoint strategy,
-  recurrent checkpoint restore path for `n_swa==0`, `pending_h`
-  zeroing for MTP. Fixes crashes at `n_parallel > 1` and forced
-  re-processing on multi-turn. Adapted to our base (SRV_TRC logging,
-  `message_spans` checkpoint API). MTP fixes (GDN shift-register,
-  premature EOS, Leviathan acceptance) deferred. (BUILD-FIXES #164)
+- **llama.cpp b9842 → b9873** (#157): DFlash p-min guard, KV-injection
+  assertion guard, GDN MTP copy optimisation, post-revert scheduler
+  stability. Build patches revalidated.
+- **Hybrid attention patches #160 → #164**: Replaced 4 shrink/expand-only
+  patches with 8 backporting mike07026's engine-layer fixes. Adds
+  `cell_zero()` fallback, checkpoint save/restore around shrink/expand,
+  `seq_pos_min` hybrid fix, anchor-tracking checkpoint strategy, recurrent
+  restore for `n_swa==0`. Fixes `n_parallel > 1` crashes and forced
+  re-processing on multi-turn. MTP fixes deferred to Phase 3.
 
 ### Added
 
 - **Hybrid attention recurrent state shrink/expand**: Backport PR #24785
-  (Moltes94) — `recurrent_shrink`/`recurrent_expand` mechanism from
-  BeeLlama. Prevents forced full prompt re-processing on Gated DeltaNet
-  models (Qwen3.6 etc.) by resizing the recurrent state to 1 cell
-  before prompt cache save/load and expanding back after. Auto-disables
-  context checkpoints on AMD GPUs for non-recurrent models (issue
-  #20176). 4 patch files: API, context, memory-recurrent, server.
-  (BUILD-FIXES #160)
+  (Moltes94) — `recurrent_shrink`/`recurrent_expand` from BeeLlama.
+  Prevents forced full prompt re-processing on Gated DeltaNet models
+  (Qwen3.6) by resizing recurrent state to 1 cell before cache save/load.
+  4 patch files: API, context, memory-recurrent, server. (#160)
 
 ### Fixed
 
-- **TRITON_ATTN `make_tensor_descriptor` crash** (BUILD-FIXES #159):
-  `triton_unified_attention.py` calls `tl.make_tensor_descriptor` in
-  `@triton.jit` helpers that are XPU-only (`USE_TD=False` on ROCm), but
-  Triton's JIT AST visitor parses all nodes before constexpr pruning,
-  triggering `AttributeError` on Triton 3.0.0. Module-level fallback stub
-  mirrors FLA ops pattern (upstream #37088/#38981). Enables
-  `int8_per_token_head` KV-cache dtype with TRITON_ATTN.
-- **Lemonade v10.9.0 backend version display**: Lemonade reads
-  `version.txt` from its own cache directory, not from custom binary
-  paths. Build-Script Step 35 publishes `version.txt` to
-  `~/.cache/lemonade/bin/llamacpp/<backend>/` so the web UI shows
-  "installed" instead of "not installed". (BUILD-FIXES #158)
-- **Stale vLLM wheel after Python-only patch changes** (BUILD-FIXES
-  #161): `should_skip_step` for vLLM used an `import`-type check that
-  skipped Step 24 when vLLM was importable — even if patches had
-  changed. A patched source tree + existing old wheel (without patch)
-  resulted in the unpatched wheel staying installed. Fix: patch-hash
-  comparison in `apply_patches`/`build_vllm` bypasses skip when patches
-  change; post-install MD5 verification of a key Python file catches
-  any remaining source-vs-site-packages discrepancy.
-- **TRITON_ATTN chained `or` crash** (BUILD-FIXES #162):
-  `compute_tile_loop_bounds` in `triton_attention_helpers.py` uses a
-  3-way `or` chain that Triton's AST-to-TTIR compiler rejects with
-  `UnsupportedLanguageConstruct`. Same root cause as #135 but in a
-  different source file. Fix: add parentheses. Enables
-  `int8_per_token_head` KV-cache with TRITON_ATTN (the
-  `make_tensor_descriptor` fix #159 alone was insufficient).
-- **Lemonade TheRock version-gate mismatch** (BUILD-FIXES #163):
-  Lemonade v10.9.0 downloads its own TheRock ROCm 7.13.0 (~2 GB)
-  despite a self-built TheRock 7.15.0 at `/opt/src/vllm/local/`.
-  `will_install_therock()` compares the version from
-  `backend_versions.json` against the system ROCm found via
-  `resolve_rocm_root()` — major.minor mismatch (7.15 ≠ 7.13) fails the
-  gate. Fix: patch `backend_versions.json` (source + build copy) to
-  7.15.0. Systemd env vars `ROCM_PATH`, `HSA_OVERRIDE_GFX_VERSION`,
-  `LD_LIBRARY_PATH` enable Lemonade to find and use the self-built
-  TheRock.
-- **llamacpp `--force-rebuild` ignored** (BUILD-FIXES #165): Step 33
-  used a hardcoded binary existence check instead of
-  `should_skip_step llamacpp`, bypassing the `--force-rebuild` CLI
-  flag. Added `skip_check` to YAML + replaced inline check with
-  `should_skip_step` call.
-- **Hybrid/recurrent shrink/expand lifecycle safety** (BUILD-FIXES
-  #166): External review identified 4 issues in the prompt-cache
-  shrink/expand path: B2 (shrink races with active slots — CRITICAL),
-  B3 (shrink return value ignored — HIGH), B4 (expand failure leaves
-  pool at size=1 — CRITICAL), B1 (prompt_clear before expand — HIGH).
-  Merged into `hybrid-attn-server.patch`: safe-shrink gate
-  (`recurrent_shrink_safe_for_prompt_cache`), RAII guard
-  (`recurrent_pool_guard`), return-value check, expand-before-clear
+- **TRITON_ATTN `make_tensor_descriptor` crash** (#159): Module-level
+  fallback stub for XPU-only `tl.make_tensor_descriptor` in `@triton.jit`
+  helpers. Enables `int8_per_token_head` KV-cache with TRITON_ATTN.
+- **Lemonade version.txt publish** (#158): Build step 35 publishes
+  `version.txt` to `~/.cache/lemonade/bin/llamacpp/<backend>/` so web UI
+  shows "installed".
+- **Stale vLLM wheel after Python-only patches** (#161): Patch-hash
+  comparison bypasses skip when patches change; post-install MD5
+  verification catches source-vs-site-packages discrepancy.
+- **TRITON_ATTN chained `or` crash** (#162): Parenthesise 3-way `or` chain
+  in `compute_tile_loop_bounds` (`UnsupportedLanguageConstruct` on
+  Triton 3.0.0). Enables `int8_per_token_head` KV-cache with TRITON_ATTN.
+- **Lemonade TheRock version-gate mismatch** (#163): Patch
+  `backend_versions.json` to 7.15.0 (self-built TheRock). Systemd env vars
+  enable Lemonade to find system ROCm.
+- **llamacpp `--force-rebuild` ignored** (#165): Replace hardcoded binary
+  check with `should_skip_step llamacpp` call.
+- **Shrink/expand lifecycle safety** (#166): External review found 4
+  issues — shrink races with active slots, shrink return value ignored,
+  expand failure leaves pool at size=1, prompt_clear before expand. Fix:
+  safe-shrink gate, RAII guard, return-value check, expand-before-clear
   ordering.
-- **Hybrid/recurrent checkpoint data corruption + cell_zero crash +
-  anchor-tracking gating** (BUILD-FIXES #167): External review #2
-  found 3 issues: B1-R2 (`clear_checkpoint()` before expand destroys
-  all slots' saved state — CRITICAL), B2-R2 (`cell_zero()` corrupts
-  shared cells via dangling tail pointers — HIGH), L1-R2
-  (anchor-tracking bypasses `do_checkpoint` gating — MEDIUM-HIGH).
-  Fix verification by reviewer #2 found that the B1-R2 fix (removing
-  `clear_checkpoint()`) introduced a NEW critical bug:
-  `restore_checkpoint()` overwrote slot 0's freshly loaded recurrent
-  state with stale backup. Fixed with selective checkpoint restore:
-  new API `llama_context_recurrent_checkpoint_remove_seq()` removes
-  the reloaded slot's entry from the checkpoint backup before
-  `expand()`. B2-R2 and L1-R2 fixes verified correct. Touches 4
-  patches: `hybrid-attn-llama-api.patch`, `hybrid-attn-llama-context.patch`,
-  `hybrid-attn-memory-recurrent.patch`, `hybrid-attn-server.patch`.
-- **Hybrid/recurrent checkpoint: non-zero slot data loss, tail rebuild,
-  zero-prefix restore guard, double-restore guard, draft flags, cell_zero
-  bookkeeping, shrink failure cleanup** (BUILD-FIXES #168): External
-  review #3 + internal subagent trace found 9 issues. Subagent found
-  `checkpoint_remove_seq(ret->id)` for `ret->id != 0` destroys recurrent
-  state (HIGH — 75% of slot assignments). Review #3 found:
-  `restore_checkpoint()` doesn't rebuild shared-cell tails (CRITICAL),
-  zero-prefix restore from old conversation (HIGH), double-restore path
-  conflict (HIGH), draft flags mismatch (HIGH, inert), cell_zero `used`
-  not decremented (LOW), stale checkpoint on shrink failure (LOW-MED).
-  Fix verification by reviewers #2 and #3: initial `ret->id == 0` guard
-  was insufficient (attn/recr mismatch for non-zero slots) — revised to
-  skip shrink entirely for `ret->id != 0`. Zero-prefix gate augmented
-  with `prompt.checkpoints.clear()` at `n_past_prefix == 0`. 9 fixes
-  across 3 patches (2 existing + 1 new):
-  `hybrid-attn-server.patch` (394 lines), `hybrid-attn-memory-recurrent.patch`
-  (707 lines), **NEW** `hybrid-attn-server-task.patch` (14 lines, YAML #51).
+- **Checkpoint data corruption + cell_zero crash + anchor-tracking**
+  (#167): External review #2 found 3 issues — `clear_checkpoint()`
+  before expand destroys all slots, `cell_zero()` corrupts shared cells,
+  anchor-tracking bypasses `do_checkpoint` gating. Fix: selective
+  checkpoint restore via `llama_context_recurrent_checkpoint_remove_seq()`.
+- **Checkpoint: non-zero slot data loss + 7 more issues** (#168):
+  External review #3 + subagent trace found 9 issues — `checkpoint_remove_seq`
+  for non-zero slots, shared-cell tail rebuild, zero-prefix restore guard,
+  double-restore guard, draft flags mismatch, cell_zero bookkeeping,
+  shrink failure cleanup. 9 fixes across 3 patches, including **NEW**
+  `hybrid-attn-server-task.patch` (YAML #51).
+- **GDN shift-register for MTP** (#169): Right-shift copy in
+  `build_recurrent_attn()`/`build_conv_state()` before slot_0 write.
+  **NEW** `mtp-shift-register.patch` (YAML #52). Verified: 21 production
+  tasks, no crash/corruption.
+- **MTP premature EOS + pending_h persistence** (#170): All draft backends
+  refuse EOS, verification on throwaway sampler clone, `pending_h`
+  serialized via `get_state()`/`set_state()`. 3 new + 2 modified patches.
+  Verified: `truncated=0` in 21/21, DA 0.77–0.99.
+- **Hybrid `seq_pos_max()` returns -1 after cell_zero()** (#171):
+  Return `attn_max` when `recr_max < 0`. 2 modified patches. Verified:
+  pos_max correct up to 91866 (35B-A3B), 72189 (27B).
+- **Checkpoint condition misses non-Qwen hybrid models** (#172):
+  `cell_zero()` fallback makes `seq_rm_type=PART`, so checkpoint condition
+  never fires for LFM2/LFM2MoE. Fix: add `needs_reeval` to condition.
+  Found during LFM2 cross-arch testing. Verified: 23 production tasks,
+  20/20 restores, 0 re-evaluated, DA 0.92 avg, concurrent multi-server,
+  context up to 102k.
 
 ## [0.5.0] - 2026-07-03
 

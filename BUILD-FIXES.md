@@ -3966,3 +3966,137 @@ Internal subagent trace (8 lifecycle paths). All findings verified.
   When `n_rs_seq > 0`.
 - **E2-R3 (MEDIUM)**: Expand failure → poor recovery state.
 - **E3-R3 (LOW)**: Prompt-cache update forced when shrink unsafe.
+
+---
+
+## #169 — GDN Shift-Register for MTP Bounded Rollback Snapshots
+
+**Symptom**: During single-token decode with `n_rs_seq > 0` (MTP enabled),
+the GDN kernel writes only `slot_0` of the K-deep snapshot array. Slots
+1..K-1 retain stale prefill data. When MTP bounded rollback reads from
+`slot_k` via `rs_idx`, the wrong (stale) state is used as input — causing
+subtle quality degradation in subsequent decode steps.
+
+**Root Cause**: `build_recurrent_attn()` and `build_conv_state()` in
+`src/models/delta-net-base.cpp` compute `n_written = min(n_seq_tokens, K)`.
+For decode (`n_seq_tokens=1`), only slot_0 is written. No right-shift of
+existing snapshots occurs.
+
+**Fix**: Insert a right-shift copy (`slot[K-1] <- slot[K-2]`, ...,
+`slot[1] <- slot[0]`) before writing the new slot_0, so each decode step
+pushes the latest state forward as a shift register. `build_conv_state()`
+also skips the redundant slot computation for slots 1..K-1 during decode
+(they were populated by the shift).
+
+**Patch**: **NEW** `mtp-shift-register.patch` (74 lines).
+**Source**: mike07026 commits `1e07292` + `d777736`.
+**YAML**: New entry #52.
+**Verified**: 2026-07-09. MTP active in 21 production tasks (13×27B +
+8×35B-A3B). No crash, no corruption. Draft Acceptance 0.77–0.99.
+
+---
+
+## #170 — MTP Premature EOS Prevention + pending_h Persistence
+
+**Symptom**: (1) Draft model proposes EOS during thinking blocks — even
+rejected EOS drafts mutate the sampler state (RNG, penalties,
+reasoning-budget), causing premature stopping. (2) MTP `pending_h`
+(cross-batch carryover) is not saved/restored during checkpoint rollback,
+causing stale carryover to bias subsequent drafts.
+
+**Root Cause #1**: Speculative verification runs on the live sampler,
+mutating its state for rejected tokens. The draft backend uses only
+top_k=10 without reasoning-budget/grammar/penalty samplers.
+
+**Fix #1**: (a) All draft backends (simple, eagle3, mtp) refuse EOS —
+EOS decided by target sampler only. (b) Verification runs on throwaway
+sampler clone via `common_sampler_sample_and_accept_n_prob()`. Original
+sampler is not mutated; committed tokens are replayed afterward.
+
+**Root Cause #2**: `common_speculative_impl_draft_mtp` does not override
+`get_state()`/`set_state()`.
+
+**Fix #2**: Implement `get_state()`/`set_state()` to serialize
+`pending_h` per sequence.
+
+**Patches**: **NEW** `mtp-eos-sampling.patch` (36 lines, sampling.cpp),
+**NEW** `mtp-eos-sampling-h.patch` (31 lines, sampling.h),
+**NEW** `mtp-eos-speculative-h.patch` (26 lines, speculative.h).
+**Modified** `hybrid-attn-speculative.patch` (18→123 lines, speculative.cpp:
+EOS refusal + draft_probs + get_state/set_state),
+**Modified** `hybrid-attn-server.patch` (394→524 lines, server-context.cpp:
+spec_draft_probs, _prob verification, replay logic, RNG advancement).
+
+**Source**: mike07026 commit `5e0d940`.
+**YAML**: New entries #53 (sampling), #54 (sampling.h), #55 (speculative.h).
+
+**Addresses tracked issues**: L1-R3 (pending_h persistence, MED-HIGH).
+**Verified**: 2026-07-09. `truncated=0` in 21/21 production tasks (no
+premature EOS). Draft Acceptance 0.77–0.99, mean len 3.34. Checkpoint
+restore works with pending_h save/restore (20/20 restores, 0 re-eval).
+
+---
+
+## #171 — Hybrid seq_pos_max() Returns -1 After cell_zero()
+
+**Symptom**: After `cell_zero()` (hybrid seq_rm fallback), recurrent
+`seq_pos_max()` returns -1. Hybrid `seq_pos_max()` returns
+`min(attn_max, -1) == -1`, despite attention KV still holding a valid
+prefix. Server checkpoint creation and speculative checkpoint metadata
+can record `pos_max = -1`.
+
+**Root Cause**: `seq_pos_max()` unconditionally takes `min(attn, recr)`.
+
+**Fix**: When `recr_pos_max < 0`, return `attn_pos_max` instead of
+forcing the result to -1.
+
+**Patches**: **Modified** `hybrid-attn-memory-hybrid.patch` (41→57 lines),
+**Modified** `hybrid-attn-memory-hybrid-iswa.patch` (56→72 lines).
+
+**Source**: Review #3 L2-R3 (MEDIUM).
+**Addresses tracked issue**: L2-R3 (seq_pos_max after cell_zero, MEDIUM).
+**Verified**: 2026-07-09. pos_max correct up to 91866 (35B-A3B) and
+72189 (27B) in production. No -1 forcing observed.
+
+## #172 — Checkpoint Condition Misses Hybrid Models with cell_zero Fallback
+
+**Symptom**: Context checkpoints are never saved for non-Qwen hybrid models
+(e.g. LFM2/LFM2MoE). The checkpoint restore path ("restored recurrent state
+from context checkpoint", "0 tokens will be re-evaluated") never fires.
+Recurrent state is silently zeroed on every multi-turn request via the
+`cell_zero()` fallback (B4-R3/#168) instead of being saved/restored.
+
+**Root Cause**: The `cell_zero()` fallback in
+`llama_memory_hybrid::seq_rm()` (added in #168) makes the hybrid memory
+always return `true` for `seq_rm`, even when the recurrent memory cannot
+perform partial rollback. This causes `common_context_can_seq_rm()` to
+report `PART` instead of `FULL`. The server's checkpoint creation
+condition only allows checkpoints for `FULL`, `RS`, or `n_swa > 0` — not
+`PART`. For LFM2 (`n_rs_seq=0`, `n_swa=0`, no `supports_rs_rollback`),
+all three conditions fail, so `do_checkpoint = false`.
+
+For Qwen3.5/3.6, `n_rs_seq > 0` (supports_rs_rollback) → `seq_rm_type = RS`
+→ checkpoint condition is met. The bug only affects non-Qwen hybrid models.
+
+**Fix**: Add `needs_reeval` (already set by #164 for all recurrent/hybrid
+models) to the checkpoint condition in `server-context.cpp`:
+
+```cpp
+do_checkpoint = do_checkpoint && (
+        ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+        ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
+        n_swa > 0 ||
+        needs_reeval);
+```
+
+This enables checkpoints for ALL recurrent/hybrid models, regardless of
+`seq_rm_type`. Pure attention models are unaffected (`needs_reeval = false`).
+
+**Patches**: **Modified** `hybrid-attn-server.patch` (524→541 lines).
+
+**Source**: LFM2 cross-architecture validation testing (2026-07-09).
+**Related**: B4-R3/#168 (cell_zero fallback), #164 (needs_reeval flag).
+**Verified**: 2026-07-09. LFM2.5-1.2B (5-turn) + LFM2.5-8B-A1B (3-turn)
+tested. Checkpoint save/restore confirmed on both. 0 tokens re-evaluated
+on every multi-turn request. Pre-#172: `do_checkpoint = no` (always).
+Post-#172: `do_checkpoint = yes` (Turn 1-2), checkpoints saved and restored.

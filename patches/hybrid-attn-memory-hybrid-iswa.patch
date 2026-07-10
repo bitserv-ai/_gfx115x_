@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/src/llama-memory-hybrid-iswa.cpp b/src/llama-memory-hybrid-iswa.cpp
-index c7d4bcd41..f102ee73d 100644
+index c7d4bcd41..8e723865c 100644
 --- a/src/llama-memory-hybrid-iswa.cpp
 +++ b/src/llama-memory-hybrid-iswa.cpp
 @@ -146,10 +146,15 @@ void llama_memory_hybrid_iswa::clear(bool data) {
@@ -23,7 +23,7 @@ index c7d4bcd41..f102ee73d 100644
      }
      return mem_attn->seq_rm(seq_id, p0, p1);
  }
-@@ -175,8 +180,9 @@ void llama_memory_hybrid_iswa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_
+@@ -175,13 +180,24 @@ void llama_memory_hybrid_iswa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_
  }
  
  llama_pos llama_memory_hybrid_iswa::seq_pos_min(llama_seq_id seq_id) const {
@@ -35,7 +35,23 @@ index c7d4bcd41..f102ee73d 100644
  }
  
  llama_pos llama_memory_hybrid_iswa::seq_pos_max(llama_seq_id seq_id) const {
-@@ -193,12 +199,16 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid_iswa::memory_br
+     // the max of the total cache is the min of the two caches' max values
+-    return std::min(mem_attn->seq_pos_max(seq_id), mem_recr->seq_pos_max(seq_id));
++    const auto attn_max = mem_attn->seq_pos_max(seq_id);
++    const auto recr_max = mem_recr->seq_pos_max(seq_id);
++
++    // After cell_zero() the recurrent pos_max is -1 while attention KV
++    // may still hold a valid prefix.  Return the attention max in that
++    // case rather than forcing the result to -1.
++    if (recr_max < 0) {
++        return attn_max;
++    }
++
++    return std::min(attn_max, recr_max);
+ }
+ 
+ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid_iswa::memory_breakdown() const {
+@@ -193,12 +209,16 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid_iswa::memory_br
  }
  
  void llama_memory_hybrid_iswa::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {

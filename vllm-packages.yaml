@@ -1965,6 +1965,36 @@ packages:
           PARTIAL_ONLY flag matching prompt_save, preventing
           state serialization layout mismatch for hybrid draft models.
 
+      # 4j. GDN shift-register for MTP bounded rollback snapshots.
+      - type: patch
+        path: "${VLLM_DIR}/patches/mtp-shift-register.patch"
+        description: >-
+          delta-net-base.cpp: shift snapshot slots right before writing
+          slot_0 during single-token decode, so slot_k holds the state
+          from k steps ago. Fixes stale snapshot data in build_recurrent_attn
+          and build_conv_state when n_rs_seq > 0.
+
+      # 4k. MTP premature EOS prevention — sampling API.
+      - type: patch
+        path: "${VLLM_DIR}/patches/mtp-eos-sampling.patch"
+        description: >-
+          sampling.cpp: add common_sampler_sample_and_accept_n_prob which
+          runs verification on a throwaway sampler clone, preventing RNG
+          and penalty state mutation during rejected draft verification.
+
+      # 4l. MTP premature EOS prevention — sampling header.
+      - type: patch
+        path: "${VLLM_DIR}/patches/mtp-eos-sampling-h.patch"
+        description: >-
+          sampling.h: declaration for common_sampler_sample_and_accept_n_prob.
+
+      # 4m. MTP premature EOS prevention — speculative header.
+      - type: patch
+        path: "${VLLM_DIR}/patches/mtp-eos-speculative-h.patch"
+        description: >-
+          speculative.h: add draft_probs field to draft params and
+          vector include for speculative state serialization.
+
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
     branch: "v10.9.0"

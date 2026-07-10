@@ -1,0 +1,36 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 75a299e23..0833a206b 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -660,6 +660,30 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
+     return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
+ }
+ 
++std::vector<llama_token> common_sampler_sample_and_accept_n_prob(
++        struct common_sampler * gsmpl,
++        struct llama_context * ctx,
++        const std::vector<int> & idxs,
++        const llama_tokens & draft,
++        const std::vector<float> * /*draft_probs*/,
++        uint32_t /*seed*/) {
++
++    // Token-matching verification on a throwaway clone.  The clone
++    // consumes dist RNG draws and mutates penalty/reasoning-budget
++    // state during verification, but the clone is discarded afterward.
++    // The caller replays the committed tokens on the original sampler
++    // to keep penalty state, RNG position, and reasoning-budget state
++    // identical to the non-speculative (MTP-off) path.
++    //
++    // Token-matching is used instead of probabilistic acceptance
++    // because the latter can accept draft tokens that the target model
++    // would not have sampled independently, causing trajectory drift
++    // that accumulates over many cycles and eventually manifests as
++    // premature EOS at structural boundaries like </think>.
++    common_sampler_ptr smpl_tmp(common_sampler_clone(gsmpl));
++    return common_sampler_sample_and_accept_n(smpl_tmp.get(), ctx, idxs, draft);
++}
++
+ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl) {
+     return llama_sampler_get_seed(gsmpl->chain);
+ }

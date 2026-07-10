@@ -1,9 +1,43 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 5b26597f6..22242b862 100644
+index 5b26597f6..a4e79ee91 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -1334,6 +1334,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -328,6 +328,16 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
+                 // add drafted token for each sequence
+                 const llama_token id = cur_p->data[0].id;
+ 
++                // Don't let the draft model propose EOS tokens.  The draft
++                // sampler uses only top_k=10 without the reasoning-budget,
++                // grammar, or penalty samplers that suppress EOS during
++                // thinking blocks.  EOS must be decided by the target model.
++                if (llama_vocab_is_eog(llama_model_get_vocab(llama_get_model(ctx_dft)), id)) {
++                    drafting[seq_id] = false;
++                    n_drafting--;
++                    continue;
++                }
++
+                 // only collect very high-confidence draft tokens
+                 if (cur_p->data[0].p < params.p_min) {
+                     drafting[seq_id] = false;
+@@ -783,6 +793,16 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
+ 
+                 const llama_token id = cur_p->data[0].id;
+ 
++                // Don't let the draft model propose EOS tokens.  The draft
++                // sampler uses only top_k=10 without the reasoning-budget,
++                // grammar, or penalty samplers that suppress EOS during
++                // thinking blocks.  EOS must be decided by the target model.
++                if (llama_vocab_is_eog(llama_model_get_vocab(llama_get_model(ctx_dft)), id)) {
++                    drafting[seq_id] = false;
++                    n_drafting--;
++                    continue;
++                }
++
+                 // only collect very high-confidence draft tokens
+                 // (configurable via --spec-draft-p-min, set to 0.0 to disable early-stop)
+                 if (cur_p->data[0].p < params.p_min) {
+@@ -1334,6 +1354,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
      }
  
      void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
@@ -16,3 +50,74 @@ index 5b26597f6..22242b862 100644
          const int32_t N = (int32_t) prompt.size();
          if (N <= 0) {
              return;
+@@ -1552,6 +1578,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+                 // add drafted token for each sequence
+                 const llama_token id = cur_p->data[0].id;
+ 
++                // The MTP draft model uses only top_k=10 sampling — it lacks
++                // the reasoning-budget, grammar, and penalty samplers that the
++                // target model uses to suppress EOS during thinking blocks.
++                // An accepted EOS draft token stops the slot prematurely, and
++                // even a rejected EOS pollutes the recurrent state through the
++                // forward pass, biasing subsequent drafts toward EOS.
++                // EOS must be decided by the target model's full sampler chain.
++                if (llama_vocab_is_eog(llama_model_get_vocab(llama_get_model(params.ctx_dft)), id)) {
++                    drafting[seq_id] = false;
++                    n_drafting--;
++                    continue;
++                }
++
+                 // only collect very high-confidence draft tokens
+                 if (cur_p->data[0].p < params.p_min) {
+                     drafting[seq_id] = false;
+@@ -1567,6 +1606,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+ 
+                 result.push_back(id);
+ 
++                // Store draft probability for probabilistic verification.
++                if (dp.draft_probs) {
++                    dp.draft_probs->push_back(cur_p->data[0].p);
++                }
++
+                 if (params.n_max <= (int) result.size()) {
+                     drafting[seq_id] = false;
+                     n_drafting--;
+@@ -1635,6 +1679,38 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+     }
+ 
++    // Persist the per-sequence cross-batch carryover hidden state in
++    // checkpoints so that a checkpoint restore (e.g. after partial draft
++    // rejection on models that require full checkpoint rollback) also
++    // restores pending_h.  Without this, a stale pending_h from a rejected
++    // draft position biases the next draft round.
++    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
++        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
++            return false;
++        }
++        if (pending_h[seq_id].empty()) {
++            return false;
++        }
++
++        const size_t row_bytes = (size_t) n_embd * sizeof(float);
++        data.resize(row_bytes);
++        std::memcpy(data.data(), pending_h[seq_id].data(), row_bytes);
++        return true;
++    }
++
++    void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
++        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
++            return;
++        }
++        if (data.size() != (size_t) n_embd * sizeof(float)) {
++            return;
++        }
++        if (pending_h[seq_id].size() != (size_t) n_embd) {
++            pending_h[seq_id].resize(n_embd);
++        }
++        std::memcpy(pending_h[seq_id].data(), data.data(), data.size());
++    }
++
+     bool need_embd() const override {
+         return false;
+     }

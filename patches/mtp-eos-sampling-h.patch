@@ -1,0 +1,31 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/common/sampling.h b/common/sampling.h
+index 4191988bb..7b7c34e52 100644
+--- a/common/sampling.h
++++ b/common/sampling.h
+@@ -85,6 +85,25 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
+ // assume idxs == [ 0, 1, 2, ..., draft.size() ]
+ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first = false);
+ 
++// Speculative verification via throwaway sampler clone.
++//
++// Runs common_sampler_sample_and_accept_n on a clone of the sampler,
++// so the original sampler's penalty/RNG/reasoning-budget state is not
++// mutated during verification.  The caller must replay the committed
++// tokens on the original sampler afterward.
++//
++// Currently uses token-matching (not probabilistic acceptance) to avoid
++// trajectory drift that can cause premature EOS at thinking boundaries.
++//
++// Returns at least 1 token, up to idxs.size().
++std::vector<llama_token> common_sampler_sample_and_accept_n_prob(
++        struct common_sampler * gsmpl,
++        struct llama_context * ctx,
++        const std::vector<int> & idxs,
++        const llama_tokens & draft,
++        const std::vector<float> * draft_probs = nullptr,
++        uint32_t seed = LLAMA_DEFAULT_SEED);
++
+ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
+ 
+ // force the reasoning budget sampler (if any) to begin forcing its end sequence now.
