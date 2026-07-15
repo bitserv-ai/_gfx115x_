@@ -81,6 +81,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Found during LFM2 cross-arch testing. Verified: 23 production tasks,
   20/20 restores, 0 re-evaluated, DA 0.92 avg, concurrent multi-server,
   context up to 102k.
+- **M-RoPE position check rejects hybrid MTP batches** (#173):
+  `llama_batch_allocr::init()` gates strict `X < Y` on `batch.token`,
+  but MTP hybrid batches carry both `token` and `embd` — the nextn head
+  re-decodes at `X == Y`, silently falling back to plain decode. Fix:
+  gate on `batch.token && !batch.embd`. Latent on b9873 (normal drafts
+  satisfy `X < Y`); hardens rollback edge cases. **NEW**
+  `mtp-mrope-batch-fix.patch` (YAML #56). Source: charlie12345/ROCmFPX
+  fork, commit `db09e3e`.
+- **Review round 4 hardening** (#174): External review (Gemini, patched
+  source only). C2: `seq_pos_max()` no longer masks zeroed recurrent
+  state — lets -1 propagate, checkpoint creation checks `pos_max < 0`
+  (supersedes #171 band-aid, root-cause fix). M1:
+  `checkpoint_remove_seq()` only removes seq_id from cell's owner set,
+  preserving sibling sequences in shared cells (via `seq_cp`). M2: RAII
+  guard released before error return, preventing double-expand. L1:
+  `set_rs_idx()` logs warning on clamp. 4 existing patches modified.
 
 ## [0.5.0] - 2026-07-03
 

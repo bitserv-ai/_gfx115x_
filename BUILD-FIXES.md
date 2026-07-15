@@ -3958,13 +3958,15 @@ Internal subagent trace (8 lifecycle paths). All findings verified.
   state during MTP speculative rollback. Deferred to Phase 3.
 - **L1-R3 (MED-HIGH)**: MTP `pending_h` not saved/restored. Phase 3.
 - **L2-R3 (MEDIUM)**: `seq_pos_max()` returns -1 after `cell_zero()`
-  while attention KV remains. After B4.
+  while attention KV remains. **Fixed in #174** — root-cause: let -1
+  propagate, add `pos_max < 0` guard in checkpoint creation.
 - **L4-R3 (LOW-MED)**: `cell_zero()` resets `rs_idx` only for caller
   on shared cells. When `n_rs_seq > 0`.
 - **L6-R3 (LOW-MED)**: `send_error` null-safety incomplete.
 - **E1-R3 (LOW)**: Full-context restore skips snapshot planes.
   When `n_rs_seq > 0`.
 - **E2-R3 (MEDIUM)**: Expand failure → poor recovery state.
+  **Partially fixed in #174** — RAII guard no longer double-expands.
 - **E3-R3 (LOW)**: Prompt-cache update forced when shrink unsafe.
 
 ---
@@ -4100,3 +4102,143 @@ This enables checkpoints for ALL recurrent/hybrid models, regardless of
 tested. Checkpoint save/restore confirmed on both. 0 tokens re-evaluated
 on every multi-turn request. Pre-#172: `do_checkpoint = no` (always).
 Post-#172: `do_checkpoint = yes` (Turn 1-2), checkpoints saved and restored.
+
+---
+
+## #173 — M-RoPE Position Check Rejects Hybrid MTP Batches
+
+**Symptom**: On M-RoPE architectures (`n_pos_per_embd > 1`, e.g. Qwen3.5/3.6
+via `LLAMA_ROPE_TYPE_IMROPE`), the MTP draft/verify batch is silently
+rejected by `llama_batch_allocr::init()`. The error log shows:
+
+```
+for M-RoPE, it is required that the position satisfies: X < Y
+decode: failed to initialize batch / llama_decode: ret = -1
+```
+
+MTP then silently falls back to plain decode. The bug is latent on our
+b9873: in normal operation the draft position is ahead of the KV cache
+(`dp.n_past > p0`), so the strict `X < Y` rule passes. It fires in
+rollback edge cases (after rejected drafts when positions are reset).
+
+**Root Cause**: The MTP draft batch is a *hybrid*: it carries a token id
+(for embedding lookup) **and** an injected pre-norm hidden-state row in
+`batch.embd`. The M-RoPE position check in `llama_batch_allocr::init()`
+gates the strict `X < Y` rule on `if (batch.token)`, but the MTP hook
+batch sets both `batch.token` and `batch.embd` (see `speculative.cpp`
+line 1281-1284: `llama_batch_init(n_b, n_embd, 1)` + manual
+`batch.token = malloc(...)`). The strict rule rejects `X == Y` (the
+nextn head re-decodes at the token's own position), while the lenient
+embedding rule (`X <= Y`) allows it.
+
+**Fix**: Gate the strict check on `batch.token && !batch.embd` so hybrid
+MTP batches take the lenient `X <= Y` path. A real backward jump
+(`X > Y`) is still rejected. Only affects the `n_pos_per_embd > 1`
+branch and only batches carrying both token and embd (produced solely
+by the MTP hook) — no change to normal M-RoPE decode, vision, or
+`draft_mtp` logic.
+
+```cpp
+// Before
+if (batch.token) {
+    if (p0 >= 0 && p0 >= seq_pos_min(s)) {  // strict X < Y
+
+// After
+if (batch.token && !batch.embd) {
+    if (p0 >= 0 && p0 >= seq_pos_min(s)) {  // strict X < Y
+```
+
+**Patches**: **NEW** `mtp-mrope-batch-fix.patch` (27 lines, YAML #56).
+
+**Source**: charlie12345/ROCmFPX fork, commit `db09e3e` (2026-07-05).
+Credit: caf + Claude. Found during M-RoPE MTP investigation on
+Qwen3.5/3.6.
+**Related**: #169-#172 (MTP fixes), PR #24785 (hybrid shrink/expand).
+**Verified**: Patch applies cleanly to b9873 (`a4107133a`). Latent bug
+ — our production validation (DA 0.77–0.99, 21 tasks) confirms MTP is
+ active despite the code path. This fix hardens against rollback
+ edge cases where `X == Y` would trigger spurious `llama_decode` failures.
+
+---
+
+## #174 — Review Round 4: seq_pos_max Root-Cause + Shared-Cell Checkpoint + Guard Hardening
+
+**Source**: External code review (Gemini, patched source only — no patch
+context provided). 4 issues found across 4 patch files.
+
+### C2 — seq_pos_max masks zeroed recurrent state (#171 root-cause fix)
+
+**Symptom**: When `cell_zero()` is called as a `seq_rm` fallback
+(rollback exceeds `n_rs_seq`), recurrent `pos_max` becomes -1. Our #171
+fix made `seq_pos_max()` return `attn_max` in this case, masking the
+loss of recurrent state. The server then creates checkpoints with
+zeroed recurrent state, and later restores them — causing silent
+quality degradation (fluent but contextually incoherent output, no
+error log).
+
+**Root Cause**: #171 was symptom treatment (prevent -1 in checkpoint
+metadata), not root-cause fix. The correct signal is -1: "recurrent
+state is lost, sequence cannot be partially reused."
+
+**Fix**: Revert the `if (recr_max < 0) return attn_max` special case in
+`seq_pos_max()` — let `std::min(attn_max, -1) = -1` propagate. Add
+`pos_max < 0` guard in checkpoint creation (`server-context.cpp`): skip
+checkpoint when recurrent state is lost. This prevents -1 from being
+recorded in checkpoint metadata (resolving the original L2-R3 issue)
+while correctly signalling that the sequence needs full re-evaluation.
+
+**Patches**: `hybrid-attn-memory-hybrid.patch`, `hybrid-attn-memory-hybrid-iswa.patch`
+(seq_pos_max revert), `hybrid-attn-server.patch` (checkpoint guard).
+
+### M1 — checkpoint_remove_seq erases entire shared cell
+
+**Symptom**: When two sequences share a recurrent cell via `seq_cp()`
+(e.g. `n_cmpl > 1` triggers `copy_state_to` in server), and
+`checkpoint_remove_seq(seq_id)` is called during prompt cache load, the
+entire cell is erased from `recr_checkpoint_cells` — silently destroying
+the sibling sequence's backup. After `expand()`, the sibling's recurrent
+state is lost.
+
+**Root Cause**: `checkpoint_remove_seq()` calls
+`recr_checkpoint_cells.erase(it)`, removing the entire cell (including
+all seq_ids) instead of just the target seq_id from the cell's owner set.
+
+**Fix**: Only erase `seq_id` from `it->seq_id`. Erase the cell from the
+vector only when its owner set becomes empty.
+
+**Patch**: `hybrid-attn-memory-recurrent.patch`.
+
+### M2 — RAII guard double-expand on failure
+
+**Symptom**: If `recurrent_expand_after_prompt_cache()` fails, the code
+returns `nullptr` before `recr_guard.release()`. The guard's destructor
+then calls `expand()` a second time, producing duplicate error messages.
+
+**Fix**: Release the guard before checking the result.
+
+**Patch**: `hybrid-attn-server.patch`.
+
+### L1 — set_rs_idx silent clamping
+
+**Symptom**: `set_rs_idx()` silently clamps `idx > n_rs_seq` to
+`n_rs_seq`, hiding potential misconfiguration.
+
+**Fix**: Log a warning before clamping.
+
+**Patch**: `hybrid-attn-memory-recurrent.patch`.
+
+**Patch summary**: 4 existing patches modified (no new files).
+
+| Patch | Change | Lines |
+|-------|--------|-------|
+| `hybrid-attn-memory-hybrid.patch` | C2: seq_pos_max revert to std::min | 49 |
+| `hybrid-attn-memory-hybrid-iswa.patch` | C2: same | 64 |
+| `hybrid-attn-memory-recurrent.patch` | M1: checkpoint_remove_seq fix + L1: set_rs_idx warning | 724 |
+| `hybrid-attn-server.patch` | C2: pos_max < 0 checkpoint guard + M2: guard.release() before return | 554 |
+
+**YAML**: No new entries (existing patches modified).
+**Verified**: Source edits applied, patches regenerated via `git diff`.
+Build required to validate compilation.
+**Related**: #171 (C2 supersedes the band-aid, now root-cause), #168
+(M1 extends Subagent fix for shared cells), E2-R3 (M2 partially
+addresses tracked issue).

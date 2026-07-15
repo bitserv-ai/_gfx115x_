@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
-index f2d49cbce..9ca37679e 100644
+index f2d49cbce..9f4e64b36 100644
 --- a/src/llama-memory-hybrid.cpp
 +++ b/src/llama-memory-hybrid.cpp
 @@ -141,10 +141,19 @@ void llama_memory_hybrid::clear(bool data) {
@@ -27,7 +27,7 @@ index f2d49cbce..9ca37679e 100644
      }
      return mem_attn->seq_rm(seq_id, p0, p1);
  }
-@@ -170,13 +179,24 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
+@@ -170,12 +179,16 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
  }
  
  llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
@@ -39,19 +39,11 @@ index f2d49cbce..9ca37679e 100644
  }
  
  llama_pos llama_memory_hybrid::seq_pos_max(llama_seq_id seq_id) const {
-     // the max of the total cache is the min of the two caches' max values
--    return std::min(mem_attn->seq_pos_max(seq_id), mem_recr->seq_pos_max(seq_id));
-+    const auto attn_max = mem_attn->seq_pos_max(seq_id);
-+    const auto recr_max = mem_recr->seq_pos_max(seq_id);
-+
-+    // After cell_zero() the recurrent pos_max is -1 while attention KV
-+    // may still hold a valid prefix.  Return the attention max in that
-+    // case rather than forcing the result to -1.
-+    if (recr_max < 0) {
-+        return attn_max;
-+    }
-+
-+    return std::min(attn_max, recr_max);
+-    // the max of the total cache is the min of the two caches' max values
++    // the max of the total cache is the min of the two caches' max values.
++    // When recurrent state is lost (cell_zero() seq_rm fallback), recr_max
++    // is -1, so min(attn, -1) = -1 — correctly signalling that the
++    // sequence cannot be partially reused.  Callers must check for -1.
+     return std::min(mem_attn->seq_pos_max(seq_id), mem_recr->seq_pos_max(seq_id));
  }
  
- std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid::memory_breakdown() const {

@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index bb3b91ab5..e54286afb 100644
+index bb3b91ab5..fa401c884 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -173,6 +173,7 @@ struct server_slot {
@@ -168,7 +168,7 @@ index bb3b91ab5..e54286afb 100644
      server_slot * get_available_slot(const server_task & task) {
          server_slot * ret = nullptr;
  
-@@ -1668,24 +1766,74 @@ private:
+@@ -1668,24 +1766,75 @@ private:
          }
  
          if (ret) {
@@ -231,11 +231,12 @@ index bb3b91ab5..e54286afb 100644
  
 +                // Expand before prompt_clear so seq_rm is not called while size == 1.
 +                if (did_shrink) {
-+                    if (!recurrent_expand_after_prompt_cache()) {
++                    const bool expand_ok = recurrent_expand_after_prompt_cache();
++                    recr_guard.release();
++                    if (!expand_ok) {
 +                        SRV_ERR("%s", "recurrent expand failed after prompt cache update\n");
 +                        return nullptr;
 +                    }
-+                    recr_guard.release();
 +                }
 +
 +                if (!load_ok) {
@@ -245,7 +246,7 @@ index bb3b91ab5..e54286afb 100644
                  SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
          }
-@@ -2052,7 +2200,11 @@ private:
+@@ -2052,7 +2201,11 @@ private:
      }
  
      void send_error(const server_slot & slot, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER) {
@@ -258,7 +259,7 @@ index bb3b91ab5..e54286afb 100644
      }
  
      void send_error(const int id_task, const std::string & error, const enum error_type type = ERROR_TYPE_SERVER, const int32_t n_prompt_tokens = 0, const int32_t n_ctx = 0) {
-@@ -2976,14 +3128,16 @@ private:
+@@ -2976,14 +3129,16 @@ private:
                          }
  
                          slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
@@ -281,7 +282,7 @@ index bb3b91ab5..e54286afb 100644
                          };
  
                          drafting.push_back(&slot);
-@@ -3244,12 +3398,18 @@ private:
+@@ -3244,12 +3399,18 @@ private:
  
                              llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
  
@@ -300,7 +301,7 @@ index bb3b91ab5..e54286afb 100644
                              if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                  const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                  if (pos_min == -1) {
-@@ -3301,6 +3461,7 @@ private:
+@@ -3301,6 +3462,7 @@ private:
                                  }
  
                                  if (pos_min >= pos_min_thold) {
@@ -308,7 +309,7 @@ index bb3b91ab5..e54286afb 100644
                                      // search for a context checkpoint
                                      const auto it = std::find_if(
                                          slot.prompt.checkpoints.rbegin(),
-@@ -3340,16 +3501,59 @@ private:
+@@ -3340,16 +3502,59 @@ private:
                              }
  
                              {
@@ -372,7 +373,7 @@ index bb3b91ab5..e54286afb 100644
                              }
                          }
  
-@@ -3422,10 +3626,15 @@ private:
+@@ -3422,10 +3627,15 @@ private:
                      // - the model does not support partial sequence removal
                      // - the model uses SWA (and we are not using `swa_full`)
                      // - the model supports partial sequence removal but only up to a fixed bound
@@ -389,7 +390,7 @@ index bb3b91ab5..e54286afb 100644
  
                      bool has_mtmd = false;
  
-@@ -3461,7 +3670,6 @@ private:
+@@ -3461,7 +3671,6 @@ private:
                      }
  
                      const auto & spans = slot.task->params.message_spans;
@@ -397,7 +398,7 @@ index bb3b91ab5..e54286afb 100644
  
                      // add prompt tokens for processing in the current batch
                      while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
-@@ -3525,7 +3733,6 @@ private:
+@@ -3525,7 +3734,6 @@ private:
                      const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
  
                      const bool is_user_start = spans.is_user_start(n_tokens_start);
@@ -405,7 +406,19 @@ index bb3b91ab5..e54286afb 100644
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
-@@ -3560,8 +3767,40 @@ private:
+@@ -3551,17 +3759,50 @@ private:
+                     const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
+                     const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+ 
+-                    // nothing to checkpoint yet
++                    // nothing to checkpoint yet, or recurrent state was lost
++                    // (cell_zero() seq_rm fallback sets pos_max to -1)
+                     // TODO: is this check needed?
+-                    if (do_checkpoint && pos_min < 0) {
++                    if (do_checkpoint && (pos_min < 0 || pos_max < 0)) {
+                         do_checkpoint = false;
+                     }
+ 
                      // do not checkpoint after mtmd chunks
                      do_checkpoint = do_checkpoint && !has_mtmd;
  
@@ -448,7 +461,7 @@ index bb3b91ab5..e54286afb 100644
                      SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
  
                      // note: we create the checkpoint before calling llama_decode(), so the current batch is not
-@@ -3833,11 +4072,22 @@ private:
+@@ -3833,11 +4074,22 @@ private:
  
              // verify and try to accept the draft
              {
@@ -475,7 +488,7 @@ index bb3b91ab5..e54286afb 100644
                  slot.spec_i_batch.clear();
  
                  GGML_ASSERT(accepted.size() >= 1);
-@@ -3857,6 +4107,11 @@ private:
+@@ -3857,6 +4109,11 @@ private:
  
                          // partial acceptance is not supported by the context -> truncate the draft and restore the state
                          slot.spec_draft = std::move(accepted);
@@ -487,7 +500,7 @@ index bb3b91ab5..e54286afb 100644
  
                          const auto & ckpt = slot.spec_ckpt;
  
-@@ -3875,12 +4130,36 @@ private:
+@@ -3875,12 +4132,36 @@ private:
                          }
  
                          slot.prompt.tokens.keep_first(ckpt.n_tokens);
@@ -525,7 +538,7 @@ index bb3b91ab5..e54286afb 100644
                  if (trace > 0) {
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
-@@ -3888,6 +4167,13 @@ private:
+@@ -3888,6 +4169,13 @@ private:
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
  
                  slot.spec_draft = std::move(accepted);

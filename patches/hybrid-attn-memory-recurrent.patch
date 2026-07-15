@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 6a4892fb4..a413bbb6c 100644
+index 6a4892fb4..811fcb229 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
 @@ -132,6 +132,7 @@ void llama_memory_recurrent::clear(bool data) {
@@ -60,7 +60,21 @@ index 6a4892fb4..a413bbb6c 100644
                  used -= 1;
              }
          }
-@@ -676,6 +691,9 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+@@ -393,7 +408,12 @@ void llama_memory_recurrent::set_rs_idx(llama_seq_id seq_id, uint32_t idx) {
+     if (seq_id < 0 || (size_t) seq_id >= rs_idx.size()) {
+         return;
+     }
+-    rs_idx[seq_id] = (idx > n_rs_seq) ? n_rs_seq : idx;
++    if (idx > n_rs_seq) {
++        LLAMA_LOG_WARN("%s: rs_idx %u for seq %d exceeds n_rs_seq %u, clamping\n",
++                __func__, idx, seq_id, n_rs_seq);
++        idx = n_rs_seq;
++    }
++    rs_idx[seq_id] = idx;
+ }
+ 
+ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_recurrent::memory_breakdown() const {
+@@ -676,6 +696,9 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
              if (cells[i].src < 0) {
                  GGML_ASSERT(rs_z >= 0);
                  cells[i].src0 = rs_z;
@@ -70,7 +84,7 @@ index 6a4892fb4..a413bbb6c 100644
              } else {
                  // Stage the source ids for all used cells to allow correct seq_* behavior
                  // and still make these values available when setting the inputs
-@@ -700,6 +718,534 @@ bool llama_memory_recurrent::get_can_shift() const {
+@@ -700,6 +723,537 @@ bool llama_memory_recurrent::get_can_shift() const {
      return true;
  }
  
@@ -244,7 +258,10 @@ index 6a4892fb4..a413bbb6c 100644
 +void llama_memory_recurrent::checkpoint_remove_seq(llama_seq_id seq_id) {
 +    for (auto it = recr_checkpoint_cells.begin(); it != recr_checkpoint_cells.end(); ++it) {
 +        if (it->seq_id.count(seq_id)) {
-+            recr_checkpoint_cells.erase(it);
++            it->seq_id.erase(seq_id);
++            if (it->seq_id.empty()) {
++                recr_checkpoint_cells.erase(it);
++            }
 +            break;
 +        }
 +    }
@@ -605,7 +622,7 @@ index 6a4892fb4..a413bbb6c 100644
  size_t llama_memory_recurrent::total_size() const {
      size_t size = 0;
      for (const auto & [_, buf] : ctxs_bufs) {
-@@ -839,6 +1385,25 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
+@@ -839,6 +1393,25 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
          } else {
              set_rs_idx(seq_id, 0);
          }
@@ -631,7 +648,7 @@ index 6a4892fb4..a413bbb6c 100644
      }
  }
  
-@@ -1258,5 +1823,5 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
+@@ -1258,5 +1831,5 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
              mem->rs_idx[seq] = 0;
          }
      }

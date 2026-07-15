@@ -1995,6 +1995,14 @@ packages:
           speculative.h: add draft_probs field to draft params and
           vector include for speculative state serialization.
 
+      # 4n. M-RoPE position check fix for hybrid MTP batches.
+      - type: patch
+        path: "${VLLM_DIR}/patches/mtp-mrope-batch-fix.patch"
+        description: >-
+          llama-batch.cpp: gate strict M-RoPE position rule on
+          batch.token && !batch.embd so hybrid MTP batches (token +
+          injected hidden state) use the lenient X <= Y path.
+
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
     branch: "v10.9.0"
