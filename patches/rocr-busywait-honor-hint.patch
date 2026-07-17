@@ -16,7 +16,7 @@ index 537bd07f66..ed951c6bf2 100644
      timer::CheckAbortTimeout(start_time, signal_abort_timeout);
  
 -    if (g_use_mwaitx) {
-+    // BUILD-FIXES #175: Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal.
++    // BUILD-FIXES #179: Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal.
 +    // On WSL2/DXG, InterruptSignal events are non-functional (supports_event_age
 +    // is false when IsDXG()), so the runtime falls back to BusyWaitSignal for all
 +    // waits. Without honoring wait_hint, every blocked wait becomes a 100% CPU

@@ -130,7 +130,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   guard released before error return, preventing double-expand. L1:
   `set_rs_idx()` logs warning on clamp. 4 existing patches modified.
 - **BusyWaitSignal ignores HSA_WAIT_STATE_BLOCKED — WSL2/DXG spin**
-  (#175): `BusyWaitSignal::WaitRelaxed()` in rocr-runtime ignores the
+  (#179): `BusyWaitSignal::WaitRelaxed()` in rocr-runtime ignores the
   `hsa_wait_state_t wait_hint` parameter — always spins. On WSL2/DXG,
   `InterruptSignal` events are non-functional (`supports_event_age=false`
   when `IsDXG()`), so the runtime falls back to `BusyWaitSignal` for all

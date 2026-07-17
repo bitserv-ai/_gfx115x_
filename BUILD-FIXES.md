@@ -3971,7 +3971,7 @@ Internal subagent trace (8 lifecycle paths). All findings verified.
 
 ---
 
-## #169 — GDN Shift-Register for MTP Bounded Rollback Snapshots
+### 169. GDN Shift-Register for MTP Bounded Rollback Snapshots
 
 **Symptom**: During single-token decode with `n_rs_seq > 0` (MTP enabled),
 the GDN kernel writes only `slot_0` of the K-deep snapshot array. Slots
@@ -3998,7 +3998,7 @@ also skips the redundant slot computation for slots 1..K-1 during decode
 
 ---
 
-## #170 — MTP Premature EOS Prevention + pending_h Persistence
+### 170. MTP Premature EOS Prevention + pending_h Persistence
 
 **Symptom**: (1) Draft model proposes EOS during thinking blocks — even
 rejected EOS drafts mutate the sampler state (RNG, penalties,
@@ -4039,7 +4039,7 @@ restore works with pending_h save/restore (20/20 restores, 0 re-eval).
 
 ---
 
-## #171 — Hybrid seq_pos_max() Returns -1 After cell_zero()
+### 171. Hybrid seq_pos_max() Returns -1 After cell_zero()
 
 **Symptom**: After `cell_zero()` (hybrid seq_rm fallback), recurrent
 `seq_pos_max()` returns -1. Hybrid `seq_pos_max()` returns
@@ -4060,7 +4060,7 @@ forcing the result to -1.
 **Verified**: 2026-07-09. pos_max correct up to 91866 (35B-A3B) and
 72189 (27B) in production. No -1 forcing observed.
 
-## #172 — Checkpoint Condition Misses Hybrid Models with cell_zero Fallback
+### 172. Checkpoint Condition Misses Hybrid Models with cell_zero Fallback
 
 **Symptom**: Context checkpoints are never saved for non-Qwen hybrid models
 (e.g. LFM2/LFM2MoE). The checkpoint restore path ("restored recurrent state
@@ -4105,7 +4105,7 @@ Post-#172: `do_checkpoint = yes` (Turn 1-2), checkpoints saved and restored.
 
 ---
 
-## #173 — M-RoPE Position Check Rejects Hybrid MTP Batches
+### 173. M-RoPE Position Check Rejects Hybrid MTP Batches
 
 **Symptom**: On M-RoPE architectures (`n_pos_per_embd > 1`, e.g. Qwen3.5/3.6
 via `LLAMA_ROPE_TYPE_IMROPE`), the MTP draft/verify batch is silently
@@ -4161,12 +4161,12 @@ Qwen3.5/3.6.
 
 ---
 
-## #174 — Review Round 4: seq_pos_max Root-Cause + Shared-Cell Checkpoint + Guard Hardening
+### 174. Review Round 4: seq_pos_max Root-Cause + Shared-Cell Checkpoint + Guard Hardening
 
 **Source**: External code review (Gemini, patched source only — no patch
 context provided). 4 issues found across 4 patch files.
 
-### C2 — seq_pos_max masks zeroed recurrent state (#171 root-cause fix)
+#### C2 — seq_pos_max masks zeroed recurrent state (#171 root-cause fix)
 
 **Symptom**: When `cell_zero()` is called as a `seq_rm` fallback
 (rollback exceeds `n_rs_seq`), recurrent `pos_max` becomes -1. Our #171
@@ -4190,7 +4190,7 @@ while correctly signalling that the sequence needs full re-evaluation.
 **Patches**: `hybrid-attn-memory-hybrid.patch`, `hybrid-attn-memory-hybrid-iswa.patch`
 (seq_pos_max revert), `hybrid-attn-server.patch` (checkpoint guard).
 
-### M1 — checkpoint_remove_seq erases entire shared cell
+#### M1 — checkpoint_remove_seq erases entire shared cell
 
 **Symptom**: When two sequences share a recurrent cell via `seq_cp()`
 (e.g. `n_cmpl > 1` triggers `copy_state_to` in server), and
@@ -4208,7 +4208,7 @@ vector only when its owner set becomes empty.
 
 **Patch**: `hybrid-attn-memory-recurrent.patch`.
 
-### M2 — RAII guard double-expand on failure
+#### M2 — RAII guard double-expand on failure
 
 **Symptom**: If `recurrent_expand_after_prompt_cache()` fails, the code
 returns `nullptr` before `recr_guard.release()`. The guard's destructor
@@ -4218,7 +4218,7 @@ then calls `expand()` a second time, producing duplicate error messages.
 
 **Patch**: `hybrid-attn-server.patch`.
 
-### L1 — set_rs_idx silent clamping
+#### L1 — set_rs_idx silent clamping
 
 **Symptom**: `set_rs_idx()` silently clamps `idx > n_rs_seq` to
 `n_rs_seq`, hiding potential misconfiguration.
@@ -4245,7 +4245,7 @@ addresses tracked issue).
 
 ---
 
-## #175 — Smart Expert Reduction (SER) for Vulkan MoE
+### 175. Smart Expert Reduction (SER) for Vulkan MoE
 
 **Source**: ik_llama.cpp PR #239 (SER algorithm, CPU-only fork).
 Ported to Vulkan backend with extensive safety hardening.
@@ -4324,7 +4324,7 @@ speedup on Qwen3.6-35B-A3B IQ4_NL.
 **Build required**: `./build-vllm.sh --step 33 --force-rebuild llamacpp`
 **Related**: ik_llama.cpp PR #239 (original CPU implementation).
 
-## #176 — WSL2 ROCm Platform Detection: amdsmi Fallback (vllm/43)
+### 176. WSL2 ROCm Platform Detection: amdsmi Fallback (vllm/43)
 
 **Symptom**: On WSL2 with `/dev/dxg`, vLLM fails at LLM init with
 `RuntimeError: Device string must not be empty`. Platform resolves to
@@ -4348,7 +4348,7 @@ and `torch.version.hip` is non-None.
 **Patch**: `patches/wsl2-rocm-platform-detection.patch` (YAML #43).
 **Tested**: WSL2 Ubuntu 26.04, gfx1150, rocminfo + torch.cuda + vLLM.
 
-## #177 — WSL2 ROCm GCN Arch: Circular Import via warning_once (vllm/44)
+### 177. WSL2 ROCm GCN Arch: Circular Import via warning_once (vllm/44)
 
 **Symptom**: After #176 fix, vLLM crashes at import with
 `ImportError: cannot import name 'current_platform' from 'vllm.platforms'`.
@@ -4370,7 +4370,7 @@ Keep `logger.debug(...)` which does not trigger the import chain.
 
 **Patch**: `patches/wsl2-rocm-gcn-arch-circular-import.patch` (YAML #44).
 
-## #178 — WSL2 UVA False Negative: pin_memory=False Blocks StagedWriteTensor (vllm/45)
+### 178. WSL2 UVA False Negative: pin_memory=False Blocks StagedWriteTensor (vllm/45)
 
 **Symptom**: After #176/#177 fixes, vLLM EngineCore subprocess crashes
 with `RuntimeError: UVA is not available` during `InferStates.__init__`.
@@ -4420,7 +4420,7 @@ Post-install patching is not needed once wheels are rebuilt.
 deployed via `vllm-rocdxg.tar.gz`. Source build script:
 `extras/wsl/build-rocdxg.sh`.
 
-### 175. BusyWaitSignal ignores HSA_WAIT_STATE_BLOCKED — WSL2/DXG 100% CPU spin
+### 179. BusyWaitSignal ignores HSA_WAIT_STATE_BLOCKED — WSL2/DXG 100% CPU spin
 
 **Symptom**: Each vLLM process (EngineCore + APIServer) consumes 200% CPU
 (2 threads at 100% each) when completely idle on WSL2. For dual-instance

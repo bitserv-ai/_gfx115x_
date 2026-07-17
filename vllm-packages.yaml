@@ -592,7 +592,7 @@ packages:
           NO_CMAKE_PACKAGE_REGISTRY forces CMake to use only the explicit
           PATHS from the dep-provider.
 
-      # 19. Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal (BUILD-FIXES #175)
+      # 19. Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal (BUILD-FIXES #179)
       - type: patch
         path: "${VLLM_DIR}/patches/rocr-busywait-honor-hint.patch"
         description: >-
