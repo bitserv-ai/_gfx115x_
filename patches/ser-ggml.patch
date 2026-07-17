@@ -1,0 +1,72 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index d6807b6dd..acdbf1d66 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -2382,6 +2382,13 @@ extern "C" {
+             struct ggml_tensor  * a,
+             int                   k);
+ 
++    GGML_API struct ggml_tensor * ggml_argsort_top_k_thresh(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,
++            int                   k,
++            int                   min_entries,
++            float                 thresh);
++
+     // top k elements per row
+     // note: the resulting top k indices are in no particular order
+     GGML_API struct ggml_tensor * ggml_top_k(
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 8a0e5c255..1277ec99f 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -1622,7 +1622,9 @@ static void ggml_compute_forward_mul_mat_id(
+             for (int id = 0; id < n_ids; ++id) {
+                 const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
+ 
+-                assert(i02 >= 0 && i02 < n_as);
++                if (i02 < 0 || i02 >= n_as) {
++                    continue;
++                }
+ 
+                 MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
+                 matrix_row_counts[i02] += 1;
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index 0f682fd18..174a59ea0 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -5320,6 +5320,33 @@ struct ggml_tensor * ggml_argsort_top_k(
+     return result;
+ }
+ 
++// ggml_argsort_top_k_thresh
++
++struct ggml_tensor * ggml_argsort_top_k_thresh(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        int                   k,
++        int                   min_entries,
++        float                 thresh) {
++    GGML_ASSERT(a->ne[0] >= k);
++
++    if (min_entries <= 0 || thresh <= 0.0f) {
++        return ggml_argsort_top_k(ctx, a, k);
++    }
++
++    struct ggml_tensor * result = ggml_argsort(ctx, a, GGML_SORT_ORDER_DESC);
++
++    ggml_set_op_params_i32(result, 1, min_entries);
++    ggml_set_op_params_f32(result, 2, thresh);
++
++    result = ggml_view_4d(ctx, result,
++                k, result->ne[1], result->ne[2], result->ne[3],
++                   result->nb[1], result->nb[2], result->nb[3],
++                0);
++
++    return result;
++}
++
+ // ggml_top_k
+ 
+ struct ggml_tensor * ggml_top_k(

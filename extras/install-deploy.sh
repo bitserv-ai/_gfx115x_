@@ -326,6 +326,33 @@ sudo systemctl daemon-reload
 info "  systemctl daemon-reload done"
 
 # ---------------------------------------------------------------------------
+# 10b. WSL2 rocdxg bridge (BUILD-FIXES #176-#178)
+# ---------------------------------------------------------------------------
+if [[ -e /dev/dxg ]]; then
+    info "WSL2 detected (/dev/dxg) — installing librocdxg.so..."
+    ROCDXG_TARBALL="${SCRIPT_DIR:-$(dirname "$0")}/vllm-rocdxg.tar.gz"
+    if [[ -f "${ROCDXG_TARBALL}" ]]; then
+        tar -xzf "${ROCDXG_TARBALL}" -C "${VLLM_DIR}/local/lib/"
+        ln -sf librocdxg.so.1.1.0 "${VLLM_DIR}/local/lib/librocdxg.so.1"
+        ln -sf librocdxg.so.1.1.0 "${VLLM_DIR}/local/lib/librocdxg.so"
+        sudo ldconfig 2>/dev/null || true
+        info "  librocdxg.so installed"
+    else
+        warn "  vllm-rocdxg.tar.gz not found — librocdxg.so not installed"
+        warn "  Build with extras/wsl/build-rocdxg.sh or download separately"
+    fi
+    # TRITON_HIP_LLD_PATH: Triton can't find ld.lld on WSL2 (no /opt/rocm)
+    LEMONADE_ENV="${LEMONADE_CONFIG_DIR}/lemonade.env"
+    if ! grep -q "TRITON_HIP_LLD_PATH" "${LEMONADE_ENV}" 2>/dev/null; then
+        echo "TRITON_HIP_LLD_PATH=${VLLM_DIR}/local/llvm/bin/ld.lld" | \
+            sudo tee -a "${LEMONADE_ENV}" >/dev/null
+        info "  TRITON_HIP_LLD_PATH added to lemonade.env"
+    fi
+else
+    info "Native Linux (no /dev/dxg) — skipping rocdxg"
+fi
+
+# ---------------------------------------------------------------------------
 # 11. Smoke checks
 # ---------------------------------------------------------------------------
 info "Running smoke checks..."
@@ -368,6 +395,10 @@ check "libpython"         "[[ -f ${VLLM_DIR}/local/lib/libpython3.13.so.1.0 ]]"
 
 if [[ "${WITH_ROCM}" == "true" ]]; then
     check "ROCm local"    "[[ -f ${VLLM_DIR}/local/lib/libamdhip64.so ]]"
+fi
+
+if [[ -e /dev/dxg ]]; then
+    check "rocdxg"        "[[ -f ${VLLM_DIR}/local/lib/librocdxg.so.1.1.0 ]]"
 fi
 
 echo

@@ -1,0 +1,18 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/utils/platform_utils.py b/vllm/utils/platform_utils.py
+index cc69d9a24..4f4a56ab2 100644
+--- a/vllm/utils/platform_utils.py
++++ b/vllm/utils/platform_utils.py
+@@ -52,6 +52,12 @@ def is_uva_available() -> bool:
+     # UVA requires pinned memory.
+     from vllm.platforms import current_platform
+ 
++    # BUILD-FIXES #178: On WSL2, is_pin_memory_available() returns False
++    # (conservative default for NVIDIA WSL). ROCm on WSL2 supports UVA
++    # via HSA — return True for ROCm regardless of pin_memory status.
++    if current_platform.is_rocm():
++        return True
++
+     # TODO: Add more requirements for UVA if needed.
+     return is_pin_memory_available() or current_platform.is_cpu()
+ 

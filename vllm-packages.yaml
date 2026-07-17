@@ -1548,6 +1548,42 @@ packages:
           (penalties.py), different source file. Single-line change, no
           functional difference.
 
+      # 43. WSL2 ROCm platform detection fallback (BUILD-FIXES #176)
+      - type: patch
+        path: "${VLLM_DIR}/patches/wsl2-rocm-platform-detection.patch"
+        description: >
+          On WSL2, amdsmi.amdsmi_init() fails (Error 34) because the
+          DXG kernel interface does not expose SMI counters. Without
+          this patch, vLLM falls through all platform plugins to
+          UnspecifiedPlatform, causing "Device string must not be
+          empty" at LLM init. Fix: add torch.cuda.is_available() +
+          torch.version.hip fallback in rocm_platform_plugin() when
+          amdsmi raises. On native Linux, amdsmi succeeds and the
+          fallback is never reached.
+
+      # 44. WSL2 ROCm GCN arch circular import (BUILD-FIXES #177)
+      - type: patch
+        path: "${VLLM_DIR}/patches/wsl2-rocm-gcn-arch-circular-import.patch"
+        description: >
+          _get_gcn_arch() in rocm.py calls logger.warning_once() when
+          amdsmi fails. warning_once() → _should_log_with_scope() →
+          imports vllm.distributed.parallel_state → imports
+          vllm.platforms → ImportError (circular: platforms/__init__.py
+          is still loading). On native Linux, amdsmi succeeds and the
+          warning path is never reached. Fix: remove warning_once,
+          keep logger.debug only.
+
+      # 45. WSL2 UVA false negative on ROCm (BUILD-FIXES #178)
+      - type: patch
+        path: "${VLLM_DIR}/patches/wsl2-uva-rocm.patch"
+        description: >
+          is_uva_available() delegates to is_pin_memory_available(),
+          which returns False on WSL2 (conservative default inherited
+          from NVIDIA WSL limitations). This causes StagedWriteTensor
+          to raise "UVA is not available" in v1 engine init. ROCm on
+          WSL2 supports unified virtual addressing via HSA — return
+          True for ROCm platform regardless of pin_memory status.
+
   # ---------------------------------------------------------------------------
   # Phase F: Attention
   # ---------------------------------------------------------------------------
@@ -2002,6 +2038,65 @@ packages:
           llama-batch.cpp: gate strict M-RoPE position rule on
           batch.token && !batch.embd so hybrid MTP batches (token +
           injected hidden state) use the lenient X <= Y path.
+
+      # 5a. SER — ggml core: argsort_top_k_thresh wrapper + CPU mul_mat_id
+      # guard (BUILD-FIXES #175, YAML #56). Adds ggml_argsort_top_k_thresh()
+      # which produces GGML_OP_ARGSORT with op_params[1]=min_entries,
+      # op_params[2]=thresh. Falls back to ggml_argsort_top_k() when
+      # disabled (min_entries<=0 || thresh<=0.0). CPU mul_mat_id assert
+      # changed to continue on sentinel (-1) IDs.
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-ggml.patch"
+        description: >-
+          ggml.h/ggml.c: ggml_argsort_top_k_thresh() wrapper producing
+          GGML_OP_ARGSORT with SER op_params. ggml-cpu.c: mul_mat_id
+          assert to continue on sentinel IDs (defense-in-depth).
+
+      # 5b. SER — llama context: cparams fields + graph call site
+      # (BUILD-FIXES #175, YAML #57). Adds min_experts/thresh_experts
+      # to llama_context_params (after type_v @369) and llama_cparams.
+      # Positional initializer updated. build_moe_ffn calls
+      # ggml_argsort_top_k_thresh instead of ggml_argsort_top_k.
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-llama.patch"
+        description: >-
+          llama.h: 2 new fields in llama_context_params after type_v.
+          llama-cparams.h: matching cparams fields. llama-context.cpp:
+          propagation + positional initializer. llama-graph.cpp:
+          build_moe_ffn call site uses ggml_argsort_top_k_thresh.
+
+      # 5c. SER — CLI interface: --ser Kmin,thresh flag
+      # (BUILD-FIXES #175, YAML #58). Adds --ser CLI arg with Kmin>=1
+      # and thresh>=0.0 validation. Positioned after --swa-full (context
+      # parameter, not sampling). common_params fields propagated to
+      # llama_context_params in common_context_params_to_llama.
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-common.patch"
+        description: >-
+          common.h: min_experts/thresh_experts in common_params after
+          n_outputs_max. common.cpp: propagation to cparams. arg.cpp:
+          --ser CLI flag with Kmin,thresh parsing and validation.
+
+      # 5d. SER — Vulkan shaders + dispatch + CPU guards
+      # (BUILD-FIXES #175, YAML #59). Core patch: topk_moe.comp threshold
+      # logic (unbiased max_val), mul_mat_vec_base.glsl sentinel guard
+      # (get_offsets()→bool, tid==0 zero-write with num_rows), 14
+      # mul_mat_vec_*.comp callers updated, add_id.comp bounds-check on
+      # p.n_experts, get_rows.comp/get_rows_quant.comp sentinel guard
+      # with gid_y increment, ggml-vulkan.cpp Option D (SER disabled
+      # when n_rows>8, no memset needed), mode-specific argsort node
+      # lookup with default abort, CPU ops.cpp get_rows+add_id guards.
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-vulkan.patch"
+        description: >-
+          topk_moe.comp: SER threshold in top-K loop using unbiased
+          max_val. mul_mat_vec_base.glsl: get_offsets()→bool, sentinel
+          bounds-check, n_experts push constant. 14 callers: tid==0
+          zero-write with num_rows. add_id.comp: n_experts push
+          constant + bounds-check. get_rows*.comp: sentinel guard with
+          gid_y increment. ggml-vulkan.cpp: Option D (SER disabled
+          n_rows>8), argsort node lookup, switch default abort.
+          ops.cpp: CPU get_rows+add_id guards with i3*nb3.
 
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"

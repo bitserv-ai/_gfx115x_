@@ -23,6 +23,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Smart Expert Reduction (SER) for Vulkan MoE** (#175): Port
+  ik_llama.cpp PR #239 SER algorithm to Vulkan backend. Threshold-based
+  expert pruning inside fused `topk_moe.comp` shader — experts with
+  probability below `thresh * top_prob` (after K_min guaranteed
+  selections) are pruned via sentinel `0xFFFFFFFF` in `ids[]`. Vector
+  `mul_mat_id` path bounds-checks and early-exits before reading expert
+  weight matrices — saving memory bandwidth on UMA. Option D: SER
+  disabled when `n_rows > 8` (PP path) — zero PP overhead, no
+  pre-zero needed. CLI: `--ser Kmin,thresh` (default: disabled).
+  5 review rounds (4 external + 1 end-to-end trace). 4 patch files:
+  `ser-ggml.patch` (#56), `ser-llama.patch` (#57), `ser-common.patch`
+  (#58), `ser-vulkan.patch` (#59). 24 source files, ~844 patch lines.
+  Live-tested on Vulkan: ~0.5-1.5 t/s speedup. Known limitations: BF16
+  weights excluded from Vector path (future fix: gate SER on weight type
+  in `build_moe_ffn`); CPU special paths (`repack.cpp`, `spacemit/ime.cpp`)
+  still assert (SER is fused-Vulkan-only, sentinels never reach CPU);
+  `--ser` accepted on all backends but `LLAMA_LOG_WARN` + `build_moe_ffn`
+  guard (`cparams.ser_active`) prevent silent no-op on CPU/HIP.
+- **WSL2 gfx1150 deploy support** (#176-#178): Full vLLM stack runs on
+  WSL2 (Ubuntu 26.04) with AMD Adrenalin driver + `/dev/dxg`. Three
+  WSL2-specific vLLM patches: (1) ROCm platform detection fallback
+  (amdsmi→torch.cuda, #176), (2) GCN arch circular import fix
+  (warning_once→debug, #177), (3) UVA false negative fix
+  (is_uva_available→True for ROCm, #178). Prebuilt `librocdxg.so.1.1.0`
+  (TheRock `a512f42c`) in `extras/wsl/`. Source build script
+  `extras/wsl/build-rocdxg.sh`. Deploy tarball `vllm-rocdxg.tar.gz`,
+  `install-deploy.sh` auto-detects `/dev/dxg`. Verified: rocminfo →
+  torch.cuda → FP16 GEMM (6.84 TFLOPS) → BF16 inference → W8A16
+  inference — all PASS on gfx1150 (Radeon 890M, Ryzen AI 9 HX 370).
+  Runtime fix in `vllm-env.sh`: `PYTORCH_HIP_ALLOC_CONF` sets
+  `expandable_segments:False` on WSL2 (hipMemCreate unsupported via
+  DXG thunk layer).
 - **Hybrid attention recurrent state shrink/expand**: Backport PR #24785
   (Moltes94) — `recurrent_shrink`/`recurrent_expand` from BeeLlama.
   Prevents forced full prompt re-processing on Gated DeltaNet models

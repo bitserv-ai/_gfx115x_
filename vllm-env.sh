@@ -319,7 +319,14 @@ unset TORCH_COMPILE_DISABLE 2>/dev/null || true
 # cycles (model loading, KV-cache growth) fragment the address space and
 # cause OOM despite sufficient free memory. expandable_segments works
 # independently of hipMallocAsync (which ignores max_split_size_mb).
-export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"
+# WSL2: expandable_segments requires hipMemCreate/hipMemSetAccess (VA-API)
+# which crashes in wsl::thunk::GpuMemory::CreatePhysicalMemory() — the DXG
+# thunk layer cannot export memory handles. Disable on WSL2.
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    export PYTORCH_HIP_ALLOC_CONF="expandable_segments:False"
+else
+    export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"
+fi
 
 # AOTriton experimental: enables gfx11xx experimental kernel paths in the
 # AOTriton (Ahead-Of-Time Triton) library. Required for Strix Halo gfx1151.
@@ -462,6 +469,9 @@ if [[ "${1:-}" == "--info" ]]; then
     echo "    ROCM_VERSION:     ${ROCM_VERSION:-<not set>}"
     echo "    HIP_CLANG_FLAGS:  ${HIP_CLANG_FLAGS}"
     echo "    HSA_GFX_OVERRIDE: ${HSA_OVERRIDE_GFX_VERSION}"
+    if [[ -n "${TRITON_HIP_LLD_PATH:-}" ]]; then
+        echo "    TRITON_HIP_LLD:   ${TRITON_HIP_LLD_PATH}"
+    fi
     echo ""
     echo "  Components:"
     echo "    AOCL-LibM:        $([[ -f "${_LOCAL_PREFIX}/lib/libalm.so" ]] && echo 'installed' || echo 'not built')"

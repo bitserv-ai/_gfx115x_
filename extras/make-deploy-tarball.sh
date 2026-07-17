@@ -19,6 +19,7 @@
 #   vllm-llamacpp-cpu.tar.gz       — CPU llama.cpp backend (~80 MB)
 #   vllm-lemonade.tar.gz           — Lemonade server + web app (~110 MB)
 #   vllm-config.tar.gz             — Scripts, configs, patches (~1 MB)
+#   vllm-rocdxg.tar.gz             — librocdxg.so for WSL2 (~160 KB)
 #   vllm-rocm-runtime.tar.gz       — TheRock ROCm runtime (optional, ~7.8 GB)
 #
 # Requirements:
@@ -122,20 +123,26 @@ ln -s libpython3.13.so.1.0 "${PY_STAGING}/lib/libpython3.13.so"
 cp -a "${LOCAL_PREFIX}/lib/python3.13" "${PY_STAGING}/lib/python3.13"
 
 # Bundle system libraries needed by C extensions (_ssl, _hashlib, _blake2,
-# _bz2, _lzma, _sqlite3, _ctypes, etc.). These are small (~11 MB total) and
-# ensure the Python interpreter works on any Linux distro without installing
-# dev packages.
+# _bz2, _lzma, _sqlite3, _ctypes, etc.) and numpy (libcblas, libblas).
+# These are small (~13 MB total) and ensure the interpreter + numpy work
+# on any Linux distro without installing dev packages.
 info "  Bundling system libraries for C extensions..."
+# Cache ldconfig output once to avoid SIGPIPE from grep -m1 closing the
+# pipe early under set -o pipefail (exit 141).
+LDCONFIG_CACHE="$(ldconfig -p 2>/dev/null | grep 'x86-64' || true)"
 PY_SYSLIBS=(
     libb2.so.1       libbz2.so.1.0     libcrypto.so.3    libedit.so.0
     libexpat.so.1    libffi.so.8      libgcc_s.so.1     libgdbm_compat.so.4
     libgdbm.so.6     libgomp.so.1     liblzma.so.5      libmpdec.so.4
     libncursesw.so.6 libpanelw.so.6   libreadline.so.8  libsqlite3.so.0
     libssl.so.3     libuuid.so.1     libz.so.1
+    libcblas.so.3   libblas.so.3      libgfortran.so.5
+    liblapack.so.3
 )
 for lib in "${PY_SYSLIBS[@]}"; do
-    # Resolve the real file (follow symlinks). Filter x86-64 to avoid lib32.
-    path=$(ldconfig -p 2>/dev/null | grep "x86-64" | grep -m1 "${lib}" | awk '{print $NF}' | xargs)
+    # Resolve the real file (follow symlinks). Here-string avoids SIGPIPE
+    # since there is no upstream process to signal.
+    path=$(grep -m1 "${lib}" <<< "${LDCONFIG_CACHE}" | awk '{print $NF}' | xargs || true)
     if [[ -n "${path}" ]] && [[ -f "${path}" ]]; then
         real=$(readlink -f "${path}")
         cp "${real}" "${PY_STAGING}/lib/"
@@ -330,7 +337,19 @@ done
 tar -czf "${DEPLOY_DIR}/vllm-config.tar.gz" -C "${STAGING}" .
 
 # ---------------------------------------------------------------------------
-# 6. ROCm runtime (optional)
+# 6. WSL2 rocdxg bridge (BUILD-FIXES #176-#178)
+# ---------------------------------------------------------------------------
+if [[ -f "${REPO_DIR}/extras/wsl/librocdxg.so.1.1.0" ]]; then
+    info "Packing librocdxg.so for WSL2 deploy..."
+    tar -czf "${DEPLOY_DIR}/vllm-rocdxg.tar.gz" \
+        -C "${REPO_DIR}/extras/wsl" \
+        librocdxg.so.1.1.0
+else
+    info "Skipping rocdxg (extras/wsl/librocdxg.so.1.1.0 not found)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. ROCm runtime (optional)
 # ---------------------------------------------------------------------------
 if [[ "${WITH_ROCM}" == "true" ]]; then
     info "Packing TheRock ROCm runtime (this will take a while)..."

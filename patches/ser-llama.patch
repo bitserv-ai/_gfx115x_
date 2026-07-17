@@ -1,0 +1,94 @@
+<!-- Copyright 2026 bitserv-ai -->
+--- a/include/llama.h	2026-07-15 22:46:21.042524514 +0200
++++ b/include/llama.h	2026-07-15 22:40:41.812629537 +0200
+@@ -368,6 +368,9 @@
+         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
+         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+ 
++        int32_t  min_experts;
++        float    thresh_experts;
++
+         // Abort callback
+         // if it returns true, execution of llama_decode() will be aborted
+         // currently works only with CPU execution
+
+--- a/src/llama-cparams.h	2026-07-15 22:46:21.042570112 +0200
++++ b/src/llama-cparams.h	2026-07-15 22:40:41.813629510 +0200
+@@ -47,6 +47,10 @@
+     bool kv_unified;
+     bool pipeline_parallel;
+ 
++    int32_t  min_experts    = -1;
++    float    thresh_experts = 0.0f;
++    bool     ser_active     = false;
++
+     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+ 
+     enum llama_context_type ctx_type;
+
+--- a/src/llama-context.cpp	2026-07-15 22:46:21.043012379 +0200
++++ b/src/llama-context.cpp	2026-07-15 22:40:41.813629510 +0200
+@@ -214,6 +214,9 @@
+     cparams.op_offload = params.op_offload;
+     cparams.kv_unified = params.kv_unified;
+ 
++    cparams.min_experts    = params.min_experts;
++    cparams.thresh_experts = params.thresh_experts;
++
+     // initialized later
+     cparams.pipeline_parallel = false;
+ 
+@@ -297,6 +300,26 @@
+         }
+         backends.emplace_back(backend_cpu);
+ 
++        // SER (Smart Expert Reduction) only has effect on the Vulkan fused topk_moe path.
++        // On CPU/HIP backends, --ser is accepted but has no effect.
++        if (cparams.min_experts > 0) {
++            bool has_vulkan = false;
++            for (auto & backend : backends) {
++                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
++                const char * name = dev ? ggml_backend_dev_name(dev) : nullptr;
++                if (name && strstr(name, "vulkan")) {
++                    has_vulkan = true;
++                    break;
++                }
++            }
++            if (has_vulkan) {
++                cparams.ser_active = true;
++            } else {
++                LLAMA_LOG_WARN("%s: --ser is active (min_experts=%d, thresh=%.2f) but no Vulkan backend found; SER is Vulkan-only and has no effect\n",
++                        __func__, cparams.min_experts, cparams.thresh_experts);
++            }
++        }
++
+         // create a list of the set_n_threads functions in the backends
+         for (auto & backend : backends) {
+             ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+@@ -3552,6 +3575,8 @@
+         /*.cb_eval_user_data           =*/ nullptr,
+         /*.type_k                      =*/ GGML_TYPE_F16,
+         /*.type_v                      =*/ GGML_TYPE_F16,
++        /*.min_experts                 =*/ -1,
++        /*.thresh_experts              =*/ 0.0f,
+         /*.abort_callback              =*/ nullptr,
+         /*.abort_callback_data         =*/ nullptr,
+         /*.embeddings                  =*/ false,
+
+--- a/src/llama-graph.cpp	2026-07-15 22:46:21.043288890 +0200
++++ b/src/llama-graph.cpp	2026-07-15 22:40:41.814629483 +0200
+@@ -1903,7 +1903,13 @@
+     // select experts
+     ggml_tensor * selected_experts = selected_experts_in;
+     if (selected_experts == nullptr) {
+-        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
++        if (cparams.ser_active) {
++            selected_experts = ggml_argsort_top_k_thresh(
++                    ctx0, selection_probs, n_expert_used,
++                    cparams.min_experts, cparams.thresh_experts); // [n_expert_used, n_tokens]
++        } else {
++            selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
++        }
+         cb(selected_experts->src[0], "ffn_moe_argsort", il);
+     }
+     cb(selected_experts, "ffn_moe_topk", il);

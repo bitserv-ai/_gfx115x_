@@ -4242,3 +4242,180 @@ Build required to validate compilation.
 **Related**: #171 (C2 supersedes the band-aid, now root-cause), #168
 (M1 extends Subagent fix for shared cells), E2-R3 (M2 partially
 addresses tracked issue).
+
+---
+
+## #175 — Smart Expert Reduction (SER) for Vulkan MoE
+
+**Source**: ik_llama.cpp PR #239 (SER algorithm, CPU-only fork).
+Ported to Vulkan backend with extensive safety hardening.
+
+**Symptom**: MoE TG is bandwidth-bound on UMA. All top-K experts are
+evaluated even when some have negligible probability. Each expert FFN
+reads ~250-290 MB of weights per token — pruning 2-4 of 8 experts
+saves ~0.5-1.1 GB of memory I/O per token.
+
+**Root Cause**: Hard top-K selection always evaluates all K experts
+regardless of probability distribution. No mechanism to skip
+low-probability experts in the fused Vulkan `topk_moe.comp` shader.
+
+**Fix**: Smart Expert Reduction (SER) — threshold-based pruning inside
+the fused `topk_moe.comp` shader. Experts with probability below
+`thresh * top_prob` (after K_min guaranteed selections) are marked as
+sentinel (`0xFFFFFFFF` in `ids[]`). The Vector `mul_mat_id` path
+(`mul_mat_vec_base.glsl`) bounds-checks sentinel IDs and early-exits
+before reading expert weight matrices — directly saving memory
+bandwidth on UMA. Option D: SER is disabled when `n_rows > 8` (PP
+path) to avoid sentinel handling in the non-Vector path.
+
+**5 review rounds**: Review 1 (REJECT — Vector OOB, late-softmax,
+push-const syntax), Review 2 (APPROVE WITH CHANGES — line numbers,
+argsort offsets), impl1 (4 implementation bugs), GPT-5.6 (3 runtime
+blockers: data race, infinite loop, unconditional memset), end-to-end
+trace (no new issues, 9 key verifications).
+
+**Safety hardening**:
+- Vector `mul_mat_id`: `get_offsets()`→`bool`, `tid==0` zero-write
+  with `num_rows` (not `NUM_ROWS`), n_experts push constant
+- `add_id.comp`: `n_experts` push constant (not `p.ne1` which is top-K),
+  bounds-check + zero-write
+- `get_rows.comp`/`get_rows_quant.comp`: sentinel guard with `gid_y +=`
+  before `continue` (prevents infinite loop in grid-stride loop)
+- Option D: SER disabled when `n_rows > 8` — no sentinels at PP,
+  no pre-zero needed, zero PP overhead
+- `topk_moe.comp`: threshold on unbiased `max_val` (not biased
+  `max_val_s`), `GATING_FUNC_SOFTMAX_WEIGHT` guard (no SER for
+  late-softmax), `-INFINITY` marking always (prevents duplicate
+  selection), `first_max_val = max_val` at k=0
+- Mode-specific argsort node lookup (+2/+3/+0) with `default: ABORT`
+- CPU guards: `ops.cpp` get_rows (4x) + add_id with `i3*nb3`,
+  `ggml-cpu.c` mul_mat_id (defense-in-depth, SER is fused-Vulkan-only)
+
+**Known limitations** (non-blocking for Qwen3.6):
+- BF16 weights excluded from Vector path by
+  `ggml_vk_use_mul_mat_vec_id` → SER would produce sentinels reaching
+  non-Vector path without pre-zero. Future fix: gate SER on weight type
+  in `build_moe_ffn`.
+- CPU special paths (`repack.cpp:4461`, `spacemit/ime.cpp:677`) still
+  assert on sentinel IDs. SER is fused-Vulkan-only; sentinels never
+  reach CPU in normal operation.
+- **Vulkan-only enforcement (A+D)**: `--ser` is accepted on all backends
+  but has no effect on CPU/HIP. Runtime warning (`LLAMA_LOG_WARN`) when
+  `--ser` is active but no Vulkan backend is found. Guard in
+  `build_moe_ffn` (`llama-graph.cpp`) falls back to `ggml_argsort_top_k`
+  when `cparams.ser_active` is false — prevents useless `op_params` writes
+  on non-Vulkan backends. `ser_active` flag set in `llama-context.cpp`
+  after backend init via `ggml_backend_dev_name()` string match.
+
+**Patches**: 4 new patch files (YAML #56-#59).
+
+| Patch | Files | Lines |
+|-------|-------|-------|
+| `ser-ggml.patch` | `ggml.h`, `ggml.c`, `ggml-cpu.c` | 72 |
+| `ser-llama.patch` | `llama.h`, `llama-cparams.h`, `llama-context.cpp`, `llama-graph.cpp` | 94 |
+| `ser-common.patch` | `common.h`, `common.cpp`, `arg.cpp` | 60 |
+| `ser-vulkan.patch` | `ggml-vulkan.cpp`, `ops.cpp`, `topk_moe.comp`, `mul_mat_vec_base.glsl`, 14× `mul_mat_vec_*.comp`, `add_id.comp`, `get_rows.comp`, `get_rows_quant.comp` | 618 |
+
+**YAML**: #56-#59 (4 new entries in `llama.cpp` package).
+**Verified**: All 17 patches (13 existing + 4 SER) apply cleanly together
+against upstream `a4107133a`. End-to-end trace completed (5 review rounds).
+Live-tested on Vulkan: `--ser 4,0.2` produces coherent output, ~0.5-1.5 t/s
+speedup on Qwen3.6-35B-A3B IQ4_NL.
+**Build required**: `./build-vllm.sh --step 33 --force-rebuild llamacpp`
+**Related**: ik_llama.cpp PR #239 (original CPU implementation).
+
+## #176 — WSL2 ROCm Platform Detection: amdsmi Fallback (vllm/43)
+
+**Symptom**: On WSL2 with `/dev/dxg`, vLLM fails at LLM init with
+`RuntimeError: Device string must not be empty`. Platform resolves to
+`UnspecifiedPlatform` instead of `RocmPlatform`.
+
+**Root cause**: `rocm_platform_plugin()` in `vllm/platforms/__init__.py`
+relies solely on `amdsmi.amdsmi_init()` + `amdsmi_get_processor_handles()`
+to detect ROCm. On WSL2, amdsmi fails with Error 34 (DXG kernel interface
+does not expose SMI counters). With no GPU detected via amdsmi, the plugin
+returns `None`, and no other platform plugin matches (CUDA needs NVML, CPU
+checks for AVX-512 only). vLLM falls through to `UnspecifiedPlatform`,
+whose `device_type` is an empty string → `torch.device("")` raises.
+
+**Fix**: In the `except` block of `rocm_platform_plugin()`, add a
+`torch.cuda.is_available()` + `torch.version.hip` fallback. On native
+Linux with KFD, amdsmi succeeds and the fallback is never reached.
+On WSL2, torch detects the GPU via HIP runtime + librocdxg.so →
+HSA → DXG ioctl chain, so `torch.cuda.is_available()` returns True
+and `torch.version.hip` is non-None.
+
+**Patch**: `patches/wsl2-rocm-platform-detection.patch` (YAML #43).
+**Tested**: WSL2 Ubuntu 26.04, gfx1150, rocminfo + torch.cuda + vLLM.
+
+## #177 — WSL2 ROCm GCN Arch: Circular Import via warning_once (vllm/44)
+
+**Symptom**: After #176 fix, vLLM crashes at import with
+`ImportError: cannot import name 'current_platform' from 'vllm.platforms'`.
+
+**Root cause**: `_get_gcn_arch()` in `vllm/platforms/rocm.py` is called
+at module level (line 209). When amdsmi fails, it enters the except block
+and calls `logger.warning_once(...)`. `warning_once()` calls
+`_should_log_with_scope()` which imports `vllm.distributed.parallel_state`,
+which imports `vllm.utils.system_utils`, which imports
+`vllm.platforms.current_platform`. But `vllm.platforms` is still being
+initialized (we're inside `_get_gcn_arch()` called during
+`import vllm.platforms.rocm`) → circular ImportError.
+
+On native Linux, amdsmi succeeds → `_get_gcn_arch()` returns early →
+the `warning_once` path is never reached.
+
+**Fix**: Remove the `logger.warning_once(...)` call in `_get_gcn_arch()`.
+Keep `logger.debug(...)` which does not trigger the import chain.
+
+**Patch**: `patches/wsl2-rocm-gcn-arch-circular-import.patch` (YAML #44).
+
+## #178 — WSL2 UVA False Negative: pin_memory=False Blocks StagedWriteTensor (vllm/45)
+
+**Symptom**: After #176/#177 fixes, vLLM EngineCore subprocess crashes
+with `RuntimeError: UVA is not available` during `InferStates.__init__`.
+
+**Root cause**: `is_uva_available()` in `vllm/utils/platform_utils.py`
+returns `is_pin_memory_available() or current_platform.is_cpu()`. On
+WSL2, `Platform.is_pin_memory_available()` returns `False` (conservative
+default inherited from NVIDIA WSL pinned-memory limitations).
+`RocmPlatform` does not override `is_pin_memory_available()`.
+
+vLLM v1's `StagedWriteTensor` (used for token ID staging) requires UVA.
+When `is_uva_available()` returns `False`, `UvaBuffer.__init__()` raises.
+
+ROCm on WSL2 supports unified virtual addressing via the HSA runtime +
+librocdxg.so — pinned memory limitations are a NVIDIA-specific concern.
+
+**Fix**: In `is_uva_available()`, return `True` for `current_platform.is_rocm()`
+regardless of `is_pin_memory_available()`. This is correct because ROCm's
+HSA runtime manages virtual address space independently of CUDA-style
+pinned memory.
+
+**Patch**: `patches/wsl2-uva-rocm.patch` (YAML #45).
+**Tested**: Full vLLM inference chain (Qwen2.5-0.5B W8A16) on WSL2 gfx1150.
+
+**Additional WSL2 runtime fix (vllm-env.sh, no patch file)**:
+`PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"` crashes on WSL2/DXG.
+`expandable_segments` requires `hipMemCreate`/`hipMemSetAccess` (VA-API),
+which fails in `wsl::thunk::GpuMemory::CreatePhysicalMemory()` — the DXG
+thunk layer cannot export memory handles. `vllm-env.sh` detects WSL2 via
+`grep -qi microsoft /proc/version` and sets `expandable_segments:False`.
+
+**Patches**: 3 new patch files (YAML #43-#45).
+
+| Patch | File | Lines |
+|-------|------|-------|
+| `wsl2-rocm-platform-detection.patch` | `vllm/platforms/__init__.py` | +8 |
+| `wsl2-rocm-gcn-arch-circular-import.patch` | `vllm/platforms/rocm.py` | -5 |
+| `wsl2-uva-rocm.patch` | `vllm/utils/platform_utils.py` | +6 |
+
+**YAML**: #43-#45 (3 new entries in `vllm` package).
+**Verified**: All 3 patches apply cleanly against vLLM `ee0da84ab`.
+Full test chain on WSL2: rocminfo → torch.cuda → GEMM FP16 (6.84 TFLOPS)
+→ vLLM import → BF16 inference → W8A16 inference — all PASS.
+**Build required**: Next vLLM wheel rebuild (patches apply at build time).
+Post-install patching is not needed once wheels are rebuilt.
+**librocdxg.so**: Prebuilt binary (`extras/wsl/librocdxg.so.1.1.0`)
+deployed via `vllm-rocdxg.tar.gz`. Source build script:
+`extras/wsl/build-rocdxg.sh`.

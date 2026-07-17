@@ -1,0 +1,20 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/vllm/platforms/__init__.py b/vllm/platforms/__init__.py
+index ac536aff0..927bcc586 100644
+--- a/vllm/platforms/__init__.py
++++ b/vllm/platforms/__init__.py
+@@ -124,6 +124,14 @@ def rocm_platform_plugin() -> str | None:
+             amdsmi.amdsmi_shut_down()
+     except Exception as e:
+         logger.debug("ROCm platform is not available because: %s", str(e))
++        if not is_rocm:
++            try:
++                import torch
++                if torch.cuda.is_available() and hasattr(torch.version, "hip") and torch.version.hip is not None:
++                    is_rocm = True
++                    logger.debug("Confirmed ROCm platform via torch.cuda (amdsmi failed).")
++            except Exception as e2:
++                logger.debug("ROCm torch.cuda fallback failed: %s", str(e2))
+ 
+     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
+ 
