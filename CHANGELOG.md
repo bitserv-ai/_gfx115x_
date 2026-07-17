@@ -129,6 +129,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   preserving sibling sequences in shared cells (via `seq_cp`). M2: RAII
   guard released before error return, preventing double-expand. L1:
   `set_rs_idx()` logs warning on clamp. 4 existing patches modified.
+- **BusyWaitSignal ignores HSA_WAIT_STATE_BLOCKED — WSL2/DXG spin**
+  (#175): `BusyWaitSignal::WaitRelaxed()` in rocr-runtime ignores the
+  `hsa_wait_state_t wait_hint` parameter — always spins. On WSL2/DXG,
+  `InterruptSignal` events are non-functional (`supports_event_age=false`
+  when `IsDXG()`), so the runtime falls back to `BusyWaitSignal` for all
+  waits. Fix: `os::uSleep(100)` when `wait_hint != HSA_WAIT_STATE_ACTIVE`.
+  Eliminates 4 threads × 100% CPU idle spin on WSL2 (~400% → ~0%). No-op
+  on native Linux (where `InterruptSignal` handles blocked waits). Patch:
+  `rocr-busywait-honor-hint.patch` (TheRock patch #19).
 
 ## [0.5.0] - 2026-07-03
 

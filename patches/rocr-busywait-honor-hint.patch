@@ -1,0 +1,30 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/default_signal.cpp b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/default_signal.cpp
+index 537bd07f66..ed951c6bf2 100644
+--- a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/default_signal.cpp
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/default_signal.cpp
+@@ -41,6 +41,7 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include "core/inc/default_signal.h"
++#include "core/util/os.h"
+ 
+ #if defined(__i386__) || defined(__x86_64__)
+ #include <mwaitxintrin.h>
+@@ -104,7 +105,15 @@ hsa_signal_value_t BusyWaitSignal::WaitRelaxed(hsa_signal_condition_t condition,
+ 
+     timer::CheckAbortTimeout(start_time, signal_abort_timeout);
+ 
+-    if (g_use_mwaitx) {
++    // BUILD-FIXES #175: Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal.
++    // On WSL2/DXG, InterruptSignal events are non-functional (supports_event_age
++    // is false when IsDXG()), so the runtime falls back to BusyWaitSignal for all
++    // waits. Without honoring wait_hint, every blocked wait becomes a 100% CPU
++    // spin-loop. On native Linux this is a no-op: BusyWaitSignal is only used
++    // for GPU_ONLY and IPC signals that pass HSA_WAIT_STATE_ACTIVE by default.
++    if (wait_hint != HSA_WAIT_STATE_ACTIVE) {
++      os::uSleep(100);
++    } else if (g_use_mwaitx) {
+       // Use timer-enabled mwaitx for busy waiting
+       timer::DoMwaitx(const_cast<int64_t*>(&signal_.value), value, 60000, true);
+     }

@@ -4419,3 +4419,75 @@ Post-install patching is not needed once wheels are rebuilt.
 **librocdxg.so**: Prebuilt binary (`extras/wsl/librocdxg.so.1.1.0`)
 deployed via `vllm-rocdxg.tar.gz`. Source build script:
 `extras/wsl/build-rocdxg.sh`.
+
+### 175. BusyWaitSignal ignores HSA_WAIT_STATE_BLOCKED — WSL2/DXG 100% CPU spin
+
+**Symptom**: Each vLLM process (EngineCore + APIServer) consumes 200% CPU
+(2 threads at 100% each) when completely idle on WSL2. For dual-instance
+(Embed + Rerank), this wastes 4 cores permanently (~400% CPU, ~38 W).
+
+**Root cause**: `BusyWaitSignal::WaitRelaxed()` in
+`projects/rocr-runtime/runtime/hsa-runtime/core/runtime/default_signal.cpp`
+accepts `hsa_wait_state_t wait_hint` as a parameter but **completely ignores
+it** — the function is a pure `while(true)` spin loop with only `mwaitx`
+as a throttle (which does not yield the thread to the OS scheduler).
+
+On native Linux, `InterruptSignal` is used for normal signals (honors
+`wait_hint`, blocks via `hsaKmtWaitOnEvent_Ext`). On WSL2 with DXG-Thunk,
+`Runtime::KfdVersion()` sets `supports_event_age=false` when `IsDXG()`,
+making `InterruptSignal` events non-functional. The runtime falls back to
+`BusyWaitSignal`/`DefaultSignal` for all waits — which always spins,
+regardless of `wait_hint`.
+
+BUILD-FIXES #101 (`hipSetDeviceFlags(hipDeviceScheduleBlockingSync)`) works
+on native Linux (sets `ActiveWait=false`, requests `InterruptSignal` creation,
+kernel futex blocks). On WSL2, the DXG-Thunk cannot register futex/interrupt
+events, so `InterruptSignal` is created but its event is non-functional —
+the wait still spins.
+
+**Diagnosis via py-spy**: `py-spy dump --pid <EngineCore>` shows only 6
+Python threads (all idle). The 2 busy threads (TIDs with `wchan=0`, State
+`R`, ~0 voluntary context switches, 20k-37k nonvoluntary) are C-level HSA
+threads created by `libhsa-runtime64.so` at first GPU kernel submission
+(~6.5 min after process start, during model loading/warmup). py-spy cannot
+see them (no Python frame). Confirmed: the spin is in HSA C code, not in
+vLLM's Python-level `run_busy_loop` (BUILD-FIXES #96 backoff works
+correctly for the Python thread).
+
+**Tested alternatives** (all ineffective on WSL2, confirming BUILD-FIXES
+#101 findings apply to WSL2 too):
+- `HSA_ENABLE_INTERRUPT=1` (default): no effect — DXG shim ignores it
+- `HSA_ENABLE_INTERRUPT=0`: forces `DefaultSignal` directly — still spins
+- `GPU_MAX_HW_QUEUES=1`: reduces queue count but not per-queue spin behavior
+- `HSA_MAX_QUEUES=1`: same — limits quantity, not wait behavior
+- `HSA_ENABLE_SDMA=0`: made spin worse (~10× more CPU)
+- `CUDA_LAUNCH_BLOCKING=1`: no effect
+- `torch.cuda.Event(blocking=True)`: no effect
+
+**Fix**: Honor `wait_hint` in `BusyWaitSignal::WaitRelaxed()` by adding
+`os::uSleep(100)` (100µs cooperative sleep) when `wait_hint !=
+HSA_WAIT_STATE_ACTIVE`. The `HSA_WAIT_STATE_ACTIVE` path (doorbell/GPU-only
+signals) keeps the existing `mwaitx` spin for low-latency. The
+`HSA_WAIT_STATE_BLOCKED` path (used by `WaitForSignal()` in
+`rocvirtual.hpp` when `active_wait==false`, i.e., after
+`hipSetDeviceFlags(BlockingSync)`) gets a 100µs sleep — negligible latency
+for inference workloads (Embed/Rerank are 99% idle), eliminates the spin.
+
+**Why this is safe on native Linux**: `hsa_amd_signal_create` only returns
+`DefaultSignal` (a `BusyWaitSignal`) when `!g_use_interrupt_wait` (i.e.,
+`HSA_ENABLE_INTERRUPT=0`) or `HSA_AMD_SIGNAL_AMD_GPU_ONLY` or IPC. Normal
+signals on native Linux go through `InterruptSignal`. So the patch only
+affects WSL2 (where interrupts are non-functional) or users who explicitly
+disable interrupts — exactly the population that needs the fix.
+
+**Patch**: `patches/rocr-busywait-honor-hint.patch` (~15 lines)
+**YAML**: `type: patch` in `packages.therock.patches` (entry #19)
+**Result**: Idle CPU drops from ~400% (4 threads × 100%) to ~0% per
+dual-instance setup. Power drops from ~38 W to ~5 W on WSL2.
+
+**Upstream status**: Not yet fixed upstream (as of rocm-systems
+`72822631d4`, 2026-07-17 — TheRock `a512f42c` submodule pin). The
+`wait_hint` parameter has been ignored since the original rocr-runtime
+codebase. The fix is WSL2-specific in practice but correct on all
+platforms — it makes `BusyWaitSignal` honor the HSA specification's
+`hsa_wait_state_t` contract.

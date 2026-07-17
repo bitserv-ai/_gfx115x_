@@ -592,6 +592,19 @@ packages:
           NO_CMAKE_PACKAGE_REGISTRY forces CMake to use only the explicit
           PATHS from the dep-provider.
 
+      # 19. Honor HSA_WAIT_STATE_BLOCKED in BusyWaitSignal (BUILD-FIXES #175)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocr-busywait-honor-hint.patch"
+        description: >-
+          BusyWaitSignal::WaitRelaxed() accepts hsa_wait_state_t wait_hint but
+          ignores it — always spins. On WSL2/DXG, InterruptSignal events are
+          non-functional (supports_event_age=false when IsDXG()), so the
+          runtime falls back to BusyWaitSignal for all waits. Without honoring
+          wait_hint, every blocked wait becomes a 100% CPU spin-loop (4 threads
+          at 100% per vLLM instance). Fix: os::uSleep(100) when wait_hint !=
+          HSA_WAIT_STATE_ACTIVE. On native Linux this is a no-op: BusyWaitSignal
+          is only used for GPU_ONLY and IPC signals that pass ACTIVE by default.
+
     environment:
       BUILD_DOCS: "OFF"
       BUILD_DOXYGEN: "OFF"
