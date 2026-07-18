@@ -1,0 +1,24 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
+--- a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
++++ b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
+@@ -1686,6 +1686,19 @@
+             interrupt_wait = false;
+           }
+         }
++
++        // BUILD-FIXES #180: Backoff when polling without HW interrupts.
++        // On WSL2/DXG, PrepareInterrupt() returns false (no EopEvent), so
++        // polling=true and WaitForInterrupt() is never called. The inner
++        // while(!finish) loop degenerates to a tight atomic::Load +
++        // CheckSignalCondition spin at 100% CPU. A 1ms cooperative sleep
++        // eliminates the spin with negligible latency for idle workloads
++        // (Embed/Rerank are 99% idle). On native Linux this is a no-op:
++        // polling stays false (InterruptSignal provides HW events).
++        if (polling && !finish) {
++          os::uSleep(1000);
++        }
++
+         // If nothing was complete and an interrupt wait was requested, then call KFD
+         if (interrupt_wait) {
+           WaitForInterrupt();

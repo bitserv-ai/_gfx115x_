@@ -4491,3 +4491,80 @@ dual-instance setup. Power drops from ~38 W to ~5 W on WSL2.
 codebase. The fix is WSL2-specific in practice but correct on all
 platforms — it makes `BusyWaitSignal` honor the HSA specification's
 `hsa_wait_state_t` contract.
+
+---
+
+### 180. AsyncEventsLoop tight polling spin — WSL2/DXG residual CPU spin
+
+**Symptom**: After BUILD-FIXES #179, each vLLM EngineCore process still
+consumes ~190% CPU (2 threads at ~100% each) when idle on WSL2. #179
+reduced 4 spinning threads to 2, but the remaining 2 threads spin in a
+different code path.
+
+**Root cause**: `Runtime::AsyncEventsLoop()` in
+`projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp` is
+the HSA background event-monitoring thread. Its design relies on
+`WaitForInterrupt()` — a blocking KFD ioctl
+(`hsaKmtWaitOnMultipleEvents_Ext`) that parks the thread until a hardware
+event fires. Before reaching that syscall, the loop does a CPU-side sweep
+of all registered signals.
+
+On WSL2/DXG, `PrepareInterrupt()` returns `false` because signals lack
+`EopEvent` (no HW interrupt backing via virtio-GPU/DXG-Thunk). This sets
+`polling = true`, and `WaitForInterrupt()` is **never called** — the only
+blocking path is skipped entirely. The inner `while (!finish)` loop
+degenerates into a tight `atomic::Load` + `CheckSignalCondition` spin
+with no sleep, yield, or backoff of any kind. There is a 200µs
+`kMaxElapsed` busy-spin window before the KFD wait, but since the KFD
+wait is never reached, the entire loop runs at 100% CPU indefinitely.
+
+**Why #179 alone is insufficient**: #179 patches
+`BusyWaitSignal::WaitRelaxed()` in `default_signal.cpp`. `AsyncEventsLoop`
+calls `Signal::WaitMultiple()` (which may internally use
+`BusyWaitSignal`), but the spinning threads were confirmed via gdb
+backtrace to be in `Runtime::AsyncEventsLoop` itself — its own inner
+polling loop, not in `BusyWaitSignal`. The inner loop does direct
+`atomic::Load` + `CheckSignalCondition` calls without going through
+`BusyWaitSignal`.
+
+**Diagnosis via gdb**: `gdb -batch -ex "info threads" -p <EngineCore>`
+shows 2 threads at 99.9% CPU in `rocr::core::Runtime::AsyncEventsLoop`.
+`/proc/<tid>/status` shows ~30k nonvoluntary context switches, ~0
+voluntary — pure userspace spin with no blocking syscalls. py-spy
+cannot see these threads (no Python frame, C-level only).
+
+**Fix**: Insert `os::uSleep(1000)` (1ms cooperative sleep) in the inner
+`while (!finish)` loop of `AsyncEventsLoop` when `polling = true` and
+`!finish`. This reduces CPU from 100% to ~0.1% per thread (1ms sleep
+between poll cycles). The 1ms latency is negligible for idle workloads
+(Embed/Rerank are 99% idle; inference latency is 1-15s).
+
+**Why this is safe on native Linux**: On native Linux, `PrepareInterrupt()`
+returns `true` (signals have `EopEvent` with real HW interrupts),
+`polling` stays `false`, and `WaitForInterrupt()` is called (thread
+blocks in KFD). The `if (polling && !finish)` guard is never true, so
+`os::uSleep` is never executed. The patch is a pure no-op on native
+Linux.
+
+**Relationship to #179**: #179 and #180 target different code paths:
+- #179: `BusyWaitSignal::WaitRelaxed()` — transient signal waits during
+  active GPU operations (kernel completion, `hipDeviceSynchronize`)
+- #180: `Runtime::AsyncEventsLoop` — persistent background event
+  monitoring thread (always running, 2 threads per vLLM instance)
+
+Both are needed for full WSL2 idle CPU elimination. #179 alone reduces
+4→2 spinning threads (partial). #180 eliminates the remaining 2. Together:
+~400% CPU → ~0% for dual-instance (Embed + Rerank).
+
+**Patch**: `patches/rocr-async-events-polling-backoff.patch` (~15 lines)
+**YAML**: `type: patch` in `packages.therock.patches` (entry #20)
+**Result**: Eliminates 2 residual spinning threads per vLLM instance
+(after #179). Combined #179+#180: ~400% → ~0% idle CPU for dual-instance.
+
+**Upstream status**: Not yet fixed upstream (as of rocm-systems
+`72822631d4`, 2026-07-17 — TheRock `a512f42c` submodule pin). The
+`AsyncEventsLoop` polling fallback has no backoff in the original
+rocr-runtime codebase — it assumes KFD interrupt wait always works.
+The fix is WSL2-specific in practice but correct on all platforms — a
+1ms sleep when polling without HW interrupts is a standard cooperative
+backoff pattern.

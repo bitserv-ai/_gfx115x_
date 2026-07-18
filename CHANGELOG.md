@@ -138,6 +138,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Eliminates 4 threads × 100% CPU idle spin on WSL2 (~400% → ~0%). No-op
   on native Linux (where `InterruptSignal` handles blocked waits). Patch:
   `rocr-busywait-honor-hint.patch` (TheRock patch #19).
+- **AsyncEventsLoop tight polling spin — WSL2/DXG residual CPU spin**
+  (#180): `Runtime::AsyncEventsLoop()` in rocr-runtime spins at 100% CPU
+  on WSL2/DXG. The loop relies on `WaitForInterrupt()` (blocking KFD
+  ioctl) to sleep, but `PrepareInterrupt()` returns false when signals
+  lack `EopEvent` (no HW interrupts on WSL2/DXG), setting `polling=true`.
+  The inner `while(!finish)` loop degenerates to a tight
+  `atomic::Load` + `CheckSignalCondition` spin with no backoff. Fix:
+  `os::uSleep(1000)` (1ms) when `polling=true && !finish`. Eliminates 2
+  residual spinning threads per vLLM instance (after #179). Combined
+  #179+#180: ~400% → ~0% idle CPU for dual-instance. No-op on native Linux
+  (where `polling` stays false). Patch:
+  `rocr-async-events-polling-backoff.patch` (TheRock patch #20).
 
 ## [0.5.0] - 2026-07-03
 

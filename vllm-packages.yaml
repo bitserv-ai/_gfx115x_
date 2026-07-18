@@ -605,6 +605,21 @@ packages:
           HSA_WAIT_STATE_ACTIVE. On native Linux this is a no-op: BusyWaitSignal
           is only used for GPU_ONLY and IPC signals that pass ACTIVE by default.
 
+      # 20. AsyncEventsLoop polling backoff (BUILD-FIXES #180)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocr-async-events-polling-backoff.patch"
+        description: >-
+          Runtime::AsyncEventsLoop in rocr-runtime spins at 100% CPU on
+          WSL2/DXG. The loop relies on WaitForInterrupt() (blocking KFD ioctl)
+          to sleep, but PrepareInterrupt() returns false when signals lack
+          EopEvent (no HW interrupts on WSL2/DXG), setting polling=true. The
+          inner while(!finish) loop then degenerates to a tight atomic::Load +
+          CheckSignalCondition spin with no backoff. Fix: os::uSleep(1000)
+          (1ms) when polling=true and !finish. Eliminates 2 residual spinning
+          threads per vLLM instance (after #179 fix). Negligible latency for
+          idle workloads (Embed/Rerank 99% idle). No-op on native Linux where
+          polling stays false (InterruptSignal provides HW events).
+
     environment:
       BUILD_DOCS: "OFF"
       BUILD_DOXYGEN: "OFF"
