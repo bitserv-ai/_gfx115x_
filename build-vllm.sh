@@ -191,7 +191,7 @@ CPYTHON_VERSION="$(ycfg '.build.cpython_version')"
 CPYTHON_TAG="v${CPYTHON_VERSION}"
 
 # Unified install prefix — all C/C++ libraries install here.
-LOCAL_PREFIX="${VLLM_DIR}/local"
+export LOCAL_PREFIX="${VLLM_DIR}/local"
 
 # Ensure ROCm paths are globally exported for JIT compilers (AITER, Triton)
 export ROCM_PATH="${LOCAL_PREFIX}"
@@ -2206,7 +2206,24 @@ build_aotriton() {
     # -DLLVM_ENABLE_WERROR=OFF: AOTriton's Triton overlay build fails 7× because
     #   NVWS tablegen headers are never generated; -Werror turns warnings into
     #   errors. Disabling WERROR avoids guaranteed failures (N7).
-    export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF -DLLVM_ENABLE_WERROR=OFF"
+    # -DLLVM_DIR=...: Pin find_package(LLVM CONFIG) to Triton's pre-built LLVM
+    #   (downloaded by build_helpers.py into ~/.triton/llvm/<hash>-ubuntu-x64/).
+    #   Without this, CMake's default PATH-based search picks up TheRock's LLVM
+    #   at /opt/src/vllm/local/lib/cmake/llvm (targets: AMDGPU SPIRV X86 — no
+    #   NVPTX), causing find_package(MLIR) in Triton's CMakeLists.txt:217 to
+    #   fail with "LLVMNVPTXCodeGen/Desc/Info missing imported targets"
+    #   because TRITON_CODEGEN_BACKENDS=amd;nvidia (BUILD-FIXES #132) links
+    #   the NVWS + NVIDIA LLVM dialects, which reference LLVMNVPTX* libraries.
+    #   The stable symlink ~/.triton/llvm/llvm-ubuntu-x64 redirects to the
+    #   current pinned LLVM hash (see get_llvm_package_info in build_helpers.py).
+    #   BUILD-FIXES #182.
+    local _triton_llvm_dir="${HOME}/.triton/llvm/llvm-ubuntu-x64/lib/cmake/llvm"
+    if [[ ! -d "${_triton_llvm_dir}" ]]; then
+        warn "Triton pre-built LLVM not found at ${_triton_llvm_dir} — " \
+             "build_helpers.py will download it but find_package(LLVM) may " \
+             "resolve to TheRock LLVM instead (BUILD-FIXES #182)."
+    fi
+    export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF -DLLVM_ENABLE_WERROR=OFF -DLLVM_DIR=${_triton_llvm_dir}"
 
     # Apply patches from YAML (remove stray rebase 'pick' line)
     apply_patches aotriton "${AOTRITON_SRC}"

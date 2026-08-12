@@ -30,10 +30,10 @@ index 89a8c4d90..13b8997ab 100644
 -                b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
 -                b_g_last = exp(b_g_last)
 +                # NOTE(gfx1151): Triton HIP compiler fails to infer types for
-+            # exp(scalar_bf16 - block_ptr_load_bf16).  Cast to float32 first
-+            # (also gives better precision for exp computation).
-+            b_g_diff = b_g_last.to(tl.float32) - b_g.to(tl.float32)
-+            b_v = b_v * tl.where(m_t, exp(b_g_diff), 0)[:, None]
++                # exp(scalar_bf16 - block_ptr_load_bf16).  Cast to float32 first
++                # (also gives better precision for exp computation).
++                b_g_diff = b_g_last.to(tl.float32) - b_g.to(tl.float32)
++                b_v = b_v * tl.where(m_t, exp(b_g_diff), 0)[:, None]
 +                b_g_last = exp(b_g_last.to(tl.float32))
              b_h1 *= b_g_last
              if K > 64:

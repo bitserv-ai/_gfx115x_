@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index bb3b91ab5..fa401c884 100644
+index bb3b91ab5..06a5b608c 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -173,6 +173,7 @@ struct server_slot {
@@ -282,7 +282,21 @@ index bb3b91ab5..fa401c884 100644
                          };
  
                          drafting.push_back(&slot);
-@@ -3244,12 +3399,18 @@ private:
+@@ -3167,6 +3322,13 @@ private:
+                                 // reuse any previously computed tokens that are common with the new prompt
+                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
+ 
++                                // Multimodal requests on hybrid/recurrent models cannot reuse
++                                // cached prompt state: the recurrent state includes contributions
++                                // from prior image chunks not available in the new request.
++                                if (input_tokens.has_mtmd && needs_reeval) {
++                                    n_past = 0;
++                                }
++
+                                 // if there is an alora invoked, don't cache after the invocation start
+                                 if (slot.alora_invocation_start > 0) {
+                                     SLT_DBG(slot, "only caching to alora invocation start (n_past = %d, alora_invocation_start = %d)\n", n_past, slot.alora_invocation_start);
+@@ -3244,12 +3406,18 @@ private:
  
                              llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
  
@@ -301,15 +315,17 @@ index bb3b91ab5..fa401c884 100644
                              if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                  const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                  if (pos_min == -1) {
-@@ -3301,6 +3462,7 @@ private:
+@@ -3300,7 +3468,8 @@ private:
+                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                  }
  
-                                 if (pos_min >= pos_min_thold) {
+-                                if (pos_min >= pos_min_thold) {
++                                if (pos_min >= pos_min_thold && !input_tokens.has_mtmd) {
 +                                    std_restored_or_reset = true;
                                      // search for a context checkpoint
                                      const auto it = std::find_if(
                                          slot.prompt.checkpoints.rbegin(),
-@@ -3340,16 +3502,59 @@ private:
+@@ -3340,16 +3509,59 @@ private:
                              }
  
                              {
@@ -346,7 +362,7 @@ index bb3b91ab5..fa401c884 100644
 +                            // so we bypass it and directly restore recurrent state.
 +                            // Gate on n_past_prefix > 0 to prevent restoring an old checkpoint
 +                            // from a previous conversation into an unrelated new request.
-+                            if (needs_reeval && n_swa == 0 && n_past_prefix > 0 && !std_restored_or_reset && !slot.prompt.checkpoints.empty()) {
++                            if (needs_reeval && n_swa == 0 && n_past_prefix > 0 && !std_restored_or_reset && !slot.prompt.checkpoints.empty() && !input_tokens.has_mtmd) {
 +                                const auto it = std::find_if(
 +                                    slot.prompt.checkpoints.rbegin(),
 +                                    slot.prompt.checkpoints.rend(),
@@ -373,7 +389,7 @@ index bb3b91ab5..fa401c884 100644
                              }
                          }
  
-@@ -3422,10 +3627,15 @@ private:
+@@ -3422,10 +3634,15 @@ private:
                      // - the model does not support partial sequence removal
                      // - the model uses SWA (and we are not using `swa_full`)
                      // - the model supports partial sequence removal but only up to a fixed bound
@@ -390,7 +406,7 @@ index bb3b91ab5..fa401c884 100644
  
                      bool has_mtmd = false;
  
-@@ -3461,7 +3671,6 @@ private:
+@@ -3461,7 +3678,6 @@ private:
                      }
  
                      const auto & spans = slot.task->params.message_spans;
@@ -398,7 +414,7 @@ index bb3b91ab5..fa401c884 100644
  
                      // add prompt tokens for processing in the current batch
                      while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
-@@ -3525,7 +3734,6 @@ private:
+@@ -3525,7 +3741,6 @@ private:
                      const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
  
                      const bool is_user_start = spans.is_user_start(n_tokens_start);
@@ -406,7 +422,7 @@ index bb3b91ab5..fa401c884 100644
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
-@@ -3551,17 +3759,50 @@ private:
+@@ -3551,17 +3766,50 @@ private:
                      const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                      const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
  
@@ -461,7 +477,7 @@ index bb3b91ab5..fa401c884 100644
                      SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
  
                      // note: we create the checkpoint before calling llama_decode(), so the current batch is not
-@@ -3833,11 +4074,22 @@ private:
+@@ -3833,11 +4081,22 @@ private:
  
              // verify and try to accept the draft
              {
@@ -488,7 +504,7 @@ index bb3b91ab5..fa401c884 100644
                  slot.spec_i_batch.clear();
  
                  GGML_ASSERT(accepted.size() >= 1);
-@@ -3857,6 +4109,11 @@ private:
+@@ -3857,6 +4116,11 @@ private:
  
                          // partial acceptance is not supported by the context -> truncate the draft and restore the state
                          slot.spec_draft = std::move(accepted);
@@ -500,7 +516,7 @@ index bb3b91ab5..fa401c884 100644
  
                          const auto & ckpt = slot.spec_ckpt;
  
-@@ -3875,12 +4132,36 @@ private:
+@@ -3875,12 +4139,36 @@ private:
                          }
  
                          slot.prompt.tokens.keep_first(ckpt.n_tokens);
@@ -538,7 +554,7 @@ index bb3b91ab5..fa401c884 100644
                  if (trace > 0) {
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
-@@ -3888,6 +4169,13 @@ private:
+@@ -3888,6 +4176,13 @@ private:
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
  
                  slot.spec_draft = std::move(accepted);

@@ -270,6 +270,7 @@ packages:
         - "lib/libhipblas.so"
         - "bin/hipcc"
         - "lib/llvm/bin/amdclang"
+    clean_generated: true
     build_dependencies:
       - joblib
       - msgpack
@@ -548,32 +549,21 @@ packages:
           dynamic linking"). Skipping the find_package when benchmarks are
           disabled avoids the premature call entirely.
 
-      # 16. Add rocdecode/rocjpeg as RUNTIME_DEPS for rocprofiler-sdk (BUILD-FIXES #115)
-      - type: patch
-        path: "${VLLM_DIR}/patches/rocprofiler-sdk-rocdecode-deps.patch"
-        description: >-
-          Add rocdecode and rocjpeg to rocprofiler-sdk's RUNTIME_DEPS in
-          profiler/CMakeLists.txt. rocprofiler-sdk calls find_package(rocdecode)
-          and find_package(rocjpeg) in rocprofiler_config_interfaces.cmake, but
-          TheRock did not declare them as dependencies. Without this, rocdecode
-          is only configured (EXCLUDE_FROM_ALL) but never built/staged, leaving
-          rocdecode-config.cmake incomplete (missing rocdecode-targets.cmake and
-          include dir). The dep-provider then finds the broken config file,
-          causing a FATAL_ERROR during rocprofiler-sdk configure.
+      # 16. DISABLED — Add rocdecode/rocjpeg as RUNTIME_DEPS for rocprofiler-sdk (BUILD-FIXES #115)
+      # Re-evaluated: rocprofiler-sdk has a built-in fallback
+      # (ROCPROFILER_SDK_USE_SYSTEM_ROCDECODE=0) when rocdecode/rocjpeg are
+      # not found. These patches forced rocdecode/rocjpeg as hard deps, but
+      # with THEROCK_ENABLE_MEDIA_LIBS=OFF the targets don't exist, causing
+      # CMake configure to fail on fresh builds. The previous build only
+      # worked because configure_therock() skipped reconfigure (cached).
+      # - type: patch
+      #   path: "${VLLM_DIR}/patches/rocprofiler-sdk-rocdecode-deps.patch"
+      # - type: patch
+      #   path: "${VLLM_DIR}/patches/therock-media-libs-before-profiler.patch"
 
-      # 17. Move media-libs before profiler in add_subdirectory order (BUILD-FIXES #115)
-      - type: patch
-        path: "${VLLM_DIR}/patches/therock-media-libs-before-profiler.patch"
-        description: >-
-          Move add_subdirectory(media-libs) before add_subdirectory(profiler)
-          in TheRock's root CMakeLists.txt. Patch #16 adds rocdecode/rocjpeg as
-          RUNTIME_DEPS to rocprofiler-sdk, but therock_cmake_subproject_declare
-          calls _therock_assert_is_cmake_subproject which does get_target_property
-          on each dep — the targets must already exist. Since rocdecode/rocjpeg
-          are declared in media-libs/CMakeLists.txt, media-libs must be processed
-          before profiler. rocdecode/rocjpeg only depend on base, core, and
-          third-party/sysdeps (all processed before both), so this reordering
-          is safe.
+      # 17. DISABLED — Move media-libs before profiler (BUILD-FIXES #115)
+      # Only needed when patch #16 is active. See #16 above.
+      # (see above — combined disable)
 
       # 18. dep-provider: NO_CMAKE_PACKAGE_REGISTRY (BUILD-FIXES #118)
       - type: patch
@@ -619,6 +609,48 @@ packages:
           threads per vLLM instance (after #179 fix). Negligible latency for
           idle workloads (Embed/Rerank 99% idle). No-op on native Linux where
           polling stays false (InterruptSignal provides HW events).
+
+      # 21. Gate rocBLAS ROCTX header probe on ROCTX option (BUILD-FIXES #110)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocblas-roctx-gating.patch"
+        description: >-
+          rocBLAS probes for roctracer/roctx.h whenever BUILD_SHARED_LIBS
+          is on, ignoring the -DROCTX=OFF CMake arg. The therock_explicit_finders
+          override intercepts the find_path and FATAL_ERRORs when roctracer
+          is not a RUNTIME_DEP (THEROCK_FLAG_INCLUDE_PROFILER=OFF). Patch gates
+          the probe on if(BUILD_SHARED_LIBS AND ROCTX) and adds DISABLE_ROCTX
+          compile definition when ROCTX is off. Restored: b50ef58 erroneously
+          removed this claiming upstream a512f42c had the fix.
+
+      # 22. ROCR blit kernel --rocm-device-lib-path (BUILD-FIXES #112)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rocr-blit-device-libs.patch"
+        description: >-
+          ROCR-Runtime OpenCL blit kernel generator uses bare clang -x cl
+          without --rocm-device-lib-path. In TheRock's build tree the bitcode
+          is at a non-standard location. Patch adds find_package(AMDDeviceLibs)
+          and resolves the bitcode path. Restored: b50ef58 erroneously removed
+          this claiming upstream a512f42c had the fix.
+
+      # 23. RCCL missing <iostream>/<map>/<string> (BUILD-FIXES #116)
+      - type: patch
+        path: "${VLLM_DIR}/patches/rccl-iostream-include.patch"
+        description: >-
+          ipc_init.cu uses std::cerr (HIP_CALL macro) without <iostream>;
+          net.cc uses std::map and std::string without <map>/<string>.
+          GCC 15 / Clang 23 no longer provide transitive includes. Patch
+          regenerated for namespace rename nccl_dda_ipc_detail ->
+          nccl_dda_detail and CRLF line endings. Restored: b50ef58
+          erroneously removed this claiming upstream a512f42c had the fix.
+
+      # 24. MIOpen ciso646 #warning suppression (BUILD-FIXES #119)
+      - type: patch
+        path: "${VLLM_DIR}/patches/miopen-ciso646-warnings.patch"
+        description: >-
+          MIOpen includes <ciso646> which emits a #warning under GCC 15 +
+          C++20. With -Werror this is fatal. Patch adds -Wno-#warnings to
+          Clang compile options. Restored: b50ef58 erroneously removed this
+          claiming upstream a512f42c had the fix.
 
     environment:
       BUILD_DOCS: "OFF"
@@ -675,6 +707,7 @@ packages:
     skip_check:
       type: file_exists
       path: "lib/libalm.so"
+    clean_generated: true
     notes: |
       Zen 5 optimized transcendentals (exp, log, sin, cos, pow) with
       AVX-512 codepaths for native 512-bit execution on Strix Halo.
@@ -1065,6 +1098,7 @@ packages:
       type: wheel
       pattern: "triton*.whl"
       import_cmd: "import triton; print(triton.__version__)"
+    clean_generated: true
     build_dependencies:
       - pybind11
     validation:
@@ -1141,6 +1175,7 @@ packages:
     skip_check:
       type: file_exists
       path: "lib/libaotriton_v2.so"
+    clean_generated: true
     notes: |
       Pre-compiles Triton attention kernels to HSACO (ahead-of-time),
       eliminating JIT compilation at inference time. v2 with Python
@@ -1630,6 +1665,7 @@ packages:
     skip_check:
       type: import
       command: "import flash_attn; print(flash_attn.__version__)"
+    clean_generated: true
     build_dependencies:
       - einops
       - packaging
@@ -1780,6 +1816,21 @@ packages:
           ROCm >= 5.x, illegal in C++20 constexpr context. gfx1151 wavefront size
           is always 32. Patches installed JIT header, consistent with vec_convert
           and hipreduce patches.
+
+      # 5. Add gfx1151 to allowed_archs list (BUILD-FIXES #184)
+      - type: sed
+        file: aiter_meta/csrc/cpp_itfs/utils.py
+        marker: '"gfx1151",'
+        marker_absent: true
+        sed_command: 's/"gfx950",/"gfx950",\n        "gfx1151",/'
+        description: >
+          Add gfx1151 to the allowed_archs list in
+          validate_and_update_archs(). The parallel list in
+          aiter/jit/core.py already includes gfx1151. The AITER-meta
+          sampling kernel (top_k_top_p_sampling_from_probs) uses only
+          hipcub/hiprand (wave32-aware), not CDNA-specific intrinsics.
+          Copy-paste omission — gfx1151 was never added when RDNA 3.5
+          support was enabled in the prebuilt AITER module path.
 
   # ---------------------------------------------------------------------------
   # Phase G: Build Validation + AITER JIT Pre-warm (no patches)
@@ -2019,7 +2070,9 @@ packages:
           clear_checkpoint after cache load, checkpoint restore path for
           n_swa==0 hybrid models, checkpoint pruning by n_past_prefix,
           anchor-tracking checkpoint strategy, PARTIAL_ONLY for draft state,
-          send_error null-safe, prompt.checkpoints.clear().
+          send_error null-safe, prompt.checkpoints.clear(), VL
+          checkpoint-restore guard (has_mtmd gates on both restore paths,
+          hybrid-VL forced full re-eval).
 
       # 4i. Server task: draft prompt-cache load flags fix.
       - type: patch
@@ -2085,13 +2138,16 @@ packages:
       # to llama_context_params (after type_v @369) and llama_cparams.
       # Positional initializer updated. build_moe_ffn calls
       # ggml_argsort_top_k_thresh instead of ggml_argsort_top_k.
+      # BF16 weight-type gate (ser_bf16) disables SER when expert
+      # weights are GGML_TYPE_BF16 (Vector path unavailable for BF16).
       - type: patch
         path: "${VLLM_DIR}/patches/ser-llama.patch"
         description: >-
           llama.h: 2 new fields in llama_context_params after type_v.
           llama-cparams.h: matching cparams fields. llama-context.cpp:
           propagation + positional initializer. llama-graph.cpp:
-          build_moe_ffn call site uses ggml_argsort_top_k_thresh.
+          build_moe_ffn call site uses ggml_argsort_top_k_thresh, gated
+          by ser_bf16 (SER disabled for GGML_TYPE_BF16 expert weights).
 
       # 5c. SER — CLI interface: --ser Kmin,thresh flag
       # (BUILD-FIXES #175, YAML #58). Adds --ser CLI arg with Kmin>=1
@@ -2112,8 +2168,9 @@ packages:
       # mul_mat_vec_*.comp callers updated, add_id.comp bounds-check on
       # p.n_experts, get_rows.comp/get_rows_quant.comp sentinel guard
       # with gid_y increment, ggml-vulkan.cpp Option D (SER disabled
-      # when n_rows>8, no memset needed), mode-specific argsort node
-      # lookup with default abort, CPU ops.cpp get_rows+add_id guards.
+      # when n_rows>8 OR output_bias!=0, no memset needed), mode-specific
+      # argsort node lookup with default abort, CPU ops.cpp
+      # get_rows+add_id guards.
       - type: patch
         path: "${VLLM_DIR}/patches/ser-vulkan.patch"
         description: >-
@@ -2123,8 +2180,9 @@ packages:
           zero-write with num_rows. add_id.comp: n_experts push
           constant + bounds-check. get_rows*.comp: sentinel guard with
           gid_y increment. ggml-vulkan.cpp: Option D (SER disabled
-          n_rows>8), argsort node lookup, switch default abort.
-          ops.cpp: CPU get_rows+add_id guards with i3*nb3.
+          n_rows>8 OR output_bias!=0 for scale-bias fusion), argsort
+          node lookup, switch default abort. ops.cpp: CPU get_rows+add_id
+          guards with i3*nb3.
 
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
@@ -2138,12 +2196,17 @@ packages:
     depends_on: [therock]
     compiler: system
     skip_marker: null
+    clean_generated: true
     patches:
       - type: sed
         file: "src/cpp/resources/backend_versions.json"
         marker: '"vulkan": "b9747"'
         description: "Disable llamacpp version check — custom builds don't match bundled releases"
         sed_command: '/"llamacpp"/,/}/ s/"vulkan": "[^"]*"/"vulkan": ""/; /"llamacpp"/,/}/ s/"rocm-stable": "[^"]*"/"rocm-stable": ""/; /"llamacpp"/,/}/ s/"rocm-nightly": "[^"]*"/"rocm-nightly": ""/; /"llamacpp"/,/}/ s/"cpu": "[^"]*"/"cpu": ""/'
+      - type: patch
+        file: "src/cpp/server/system_info.cpp"
+        path: "lemonade-apu-vram-gtt.patch"
+        description: "APU-aware VRAM monitor: include GTT in pressure calculation for integrated GPUs (gfx1151)"
     notes: |
       Lemonade inference server built from source (CMake + Ninja) on branch
       v10.9.0 at pinned commit. Produces lemond (daemon) + lemonade (CLI)

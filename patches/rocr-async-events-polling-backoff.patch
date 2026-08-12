@@ -1,12 +1,12 @@
 <!-- Copyright 2026 bitserv-ai -->
-diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
---- a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
-+++ b/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
-@@ -1686,6 +1686,19 @@
+diff --git a/rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp b/rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
+index c8dd59f236..961947313c 100644
+--- a/rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
++++ b/rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp
+@@ -1953,6 +1953,18 @@ void Runtime::AsyncEventsLoop(void* _eventsInfo) {
              interrupt_wait = false;
            }
          }
-+
 +        // BUILD-FIXES #180: Backoff when polling without HW interrupts.
 +        // On WSL2/DXG, PrepareInterrupt() returns false (no EopEvent), so
 +        // polling=true and WaitForInterrupt() is never called. The inner
@@ -21,4 +21,4 @@ diff --git a/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp 
 +
          // If nothing was complete and an interrupt wait was requested, then call KFD
          if (interrupt_wait) {
-           WaitForInterrupt();
+           // Active poll before the expensive kernel wait, matching WaitMultiple's

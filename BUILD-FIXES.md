@@ -1985,23 +1985,30 @@ by default and hard-fail if roctx64/roctracer is not present during configure.
 `-DHIPSPARSELT_ENABLE_MARKER=OFF`, and `-DMIOPEN_USE_ROCTRACER=OFF` into
 their respective CMake args.
 
-### 110. rocBLAS roctracer header probe despite ROCTX=OFF — **SUPERSEDED**
+### 110. rocBLAS roctracer header probe despite ROCTX=OFF
 
 **Files:** `math-libs/BLAS/CMakeLists.txt`,
 `rocm-libraries/projects/rocblas/library/CMakeLists.txt`
 
 **Symptom**: rocBLAS probes for roctracer/roctx.h whenever
 `BUILD_SHARED_LIBS` is on, even when `-DROCTX=OFF` is set at the
-super-project layer.
+super-project layer. The `therock_explicit_finders.cmake` override
+intercepts the `find_path` and issues `FATAL_ERROR` when roctracer is
+not a RUNTIME_DEP (`THEROCK_FLAG_INCLUDE_PROFILER=OFF`).
 
 **Fix**: (1) Inject `-DROCTX=OFF` into the super-project CMake args.
 (2) Gate the shared-library probe on `if(BUILD_SHARED_LIBS AND ROCTX)`.
 (3) Define `DISABLE_ROCTX` compile definition when `NOT ROCTX`.
 
-**Patch**: `patches/rocblas-roctx-gating.patch` — **OBSOLETE**: The patch
-content is already included in the pinned TheRock commit `a512f42c`.
-The super-project sed injection (`-DROCTX=OFF`, YAML #10) remains active.
-Patch file and YAML entry removed.
+**Patch**: `patches/rocblas-roctx-gating.patch` (YAML #21).
+
+**b50ef58 regression**: Commit b50ef58 erroneously marked this OBSOLETE
+claiming the fix was in upstream a512f42c. Source verification confirmed
+rocBLAS `library/CMakeLists.txt` at a512f42c still has
+`if(BUILD_SHARED_LIBS)` without `AND ROCTX`. The `-DROCTX=OFF` CMake arg
+(YAML #10) is ineffective because rocBLAS does not define
+`option(ROCTX ...)`. Patch restored after fresh `--rebuild` exposed
+rocBLAS configure FATAL_ERROR (BUILD-FIXES #181).
 
 ### 111. rocSPARSE BUILD_WITH_ROCTX not passed by TheRock
 
@@ -2012,7 +2019,7 @@ TheRock does not pass that option, so profiler-disabled builds still fail.
 
 **Fix**: Inject `-DBUILD_WITH_ROCTX=OFF` into the super-project CMake args.
 
-### 112. ROCR-Runtime OpenCL blit kernels missing --rocm-device-lib-path — **SUPERSEDED**
+### 112. ROCR-Runtime OpenCL blit kernels missing --rocm-device-lib-path
 
 **File:** `rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/image/blit_src/CMakeLists.txt`
 
@@ -2033,8 +2040,14 @@ dep-provider system) and resolves the bitcode directory via
 `AMD_DEVICE_LIBS_PREFIX/amdgcn/bitcode`, with a
 `CMAKE_PREFIX_PATH`-based fallback for standalone builds.
 
-**Status**: **OBSOLETE** — The patch content is already included in the
-pinned TheRock commit `a512f42c`. Patch file and YAML entry removed.
+**Patch**: `patches/rocr-blit-device-libs.patch` (YAML #22).
+
+**b50ef58 regression**: Commit b50ef58 erroneously marked this OBSOLETE
+claiming the fix was in upstream a512f42c. Source verification confirmed
+no `AMDDeviceLibs` or `--rocm-device-lib-path` in the blit_src
+`CMakeLists.txt` at a512f42c. The previous build passed because clang
+found bitcode through its default search path — fragile and
+non-reproducible. Patch restored (BUILD-FIXES #181).
 
 ### 113. PyTorch ROCm import failure diagnostics and automatic wheel reinstall
 
@@ -2089,7 +2102,7 @@ written to `_init.cmake` unconditionally.
 disabled, the `find_package` is skipped entirely, avoiding the premature
 call before `project()`.
 
-### 115. rocprofiler-sdk configure fails: rocdecode-config.cmake references unbuilt files
+### 115. rocprofiler-sdk configure: rocdecode/rocjpeg not staged — **DISABLED (re-evaluated)**
 
 **File:** `profiler/CMakeLists.txt` (TheRock)
 
@@ -2115,29 +2128,45 @@ TheRock's `profiler/CMakeLists.txt` does not declare rocdecode/rocjpeg as
 `rocdecode-targets.cmake` (not yet generated) and `build/include` (not yet
 staged), causing a FATAL_ERROR.
 
-**Fix**: Add `rocdecode` and `rocjpeg` to `RUNTIME_DEPS` of rocprofiler-sdk
-in `profiler/CMakeLists.txt`. This ensures TheRock builds and stages
-rocdecode/rocjpeg before rocprofiler-sdk configure runs, making
-`rocdecode-config.cmake` and `rocdecode-targets.cmake` complete and
-resolvable.
 
-**Patch**: `patches/rocprofiler-sdk-rocdecode-deps.patch` (YAML #16)
+**File:** `profiler/CMakeLists.txt`, `media-libs/CMakeLists.txt` (TheRock main repo)
 
-**Follow-up**: Adding `rocdecode`/`rocjpeg` as `RUNTIME_DEPS` caused
-`get_target_property() called with non-existent target "rocdecode"` because
-`add_subdirectory(profiler)` (line 501) is processed before
-`add_subdirectory(media-libs)` (line 510) in TheRock's root `CMakeLists.txt`.
-`therock_cmake_subproject_declare` calls
-`_therock_assert_is_cmake_subproject` which does `get_target_property` on each
-`RUNTIME_DEPS` target — the targets must already exist. Since
-rocdecode/rocjpeg only depend on `base`, `core`, and `third-party/sysdeps`
-(all processed before both), moving `add_subdirectory(media-libs)` before
-`add_subdirectory(profiler)` is safe.
+**Original Symptom**: rocprofiler-sdk configure fails because
+`find_package(rocdecode)` in `rocprofiler_config_interfaces.cmake` finds an
+incomplete `rocdecode-config.cmake` (missing `rocdecode-targets.cmake` and
+include dir).
 
-**Follow-up patch**: `patches/therock-media-libs-before-profiler.patch`
-(YAML #17)
+**Original Fix**: Add `rocdecode` and `rocjpeg` to `RUNTIME_DEPS` of
+rocprofiler-sdk in `profiler/CMakeLists.txt` (Patch #16), and move
+`add_subdirectory(media-libs)` before `add_subdirectory(profiler)` (Patch #17).
 
-### 116. rccl missing `<iostream>`/`<map>`/`<string>` for `std::cerr`/`std::map`/`std::string` — **SUPERSEDED**
+**Re-evaluation**: The original fix was incorrect. rocprofiler-sdk has a
+built-in fallback in `rocprofiler_config_interfaces.cmake`: when
+`find_package(rocdecode)` fails, it sets
+`ROCPROFILER_SDK_USE_SYSTEM_ROCDECODE=0` (same for rocjpeg). This is a
+graceful degradation — rocprofiler-sdk builds fine without rocdecode/rocjpeg.
+
+Patches #16/#17 forced rocdecode/rocjpeg as hard `RUNTIME_DEPS`, but with
+`THEROCK_ENABLE_MEDIA_LIBS=OFF` (our build config), the rocdecode/rocjpeg
+targets are never declared in `media-libs/CMakeLists.txt`. This causes
+`get_target_property() called with non-existent target "rocdecode"` during
+CMake configure. The previous build only worked because `configure_therock()`
+skipped reconfigure (cached build tree from before the patches were added).
+
+Additionally, `THEROCK_ENABLE_ROCPROFV3` cannot be set to OFF because BLAS,
+RAND, FFT, MIOpen, and RCCL all `REQUIRES ROCPROFV3` in TheRock's feature
+topology. `therock_finalize_features()` force-enables ROCPROFV3 regardless of
+the `-D` flag.
+
+**Resolution**: Patches #16/#17 disabled in YAML. rocdecode/rocjpeg are not
+needed for LLM inference (video decode / JPEG decode libraries). Patch #18
+(dep-provider NO_CMAKE_PACKAGE_REGISTRY) remains active — it is independently
+useful and does not depend on #16/#17.
+
+**Patches (disabled):** `patches/rocprofiler-sdk-rocdecode-deps.patch` (YAML #16),
+`patches/therock-media-libs-before-profiler.patch` (YAML #17)
+
+### 116. rccl missing `<iostream>`/`<map>`/`<string>` for `std::cerr`/`std::map`/`std::string`
 
 **File:** `rocm-systems/projects/rccl/src/ipc_init.cu`, `rocm-systems/projects/rccl/src/transport/net.cc` (TheRock submodule)
 
@@ -2171,9 +2200,16 @@ the de-duplication, but any CMakeLists.txt flag change triggers a full
 rccl rebuild (34834 targets, ~4h). Source-level `#include` avoids both
 issues.
 
-**Patch**: `patches/rccl-iostream-include.patch` (YAML #21) — **OBSOLETE**:
-The missing includes are already present in the pinned TheRock commit
-`a512f42c`. Patch file and YAML entry removed.
+**Patch**: `patches/rccl-iostream-include.patch` (YAML #23). Original
+patch restored from `b50ef58^` — blob hash, file mode (100755), and
+namespace (`nccl_dda_ipc_detail`) match the pinned rocm-systems commit
+`72822631d4`. CRLF line endings in `ipc_init.cu` (BUILD-FIXES #123 applies).
+
+**b50ef58 regression**: Commit b50ef58 erroneously marked this OBSOLETE
+claiming the missing includes were present in upstream a512f42c. Source
+verification confirmed `ipc_init.cu` has no `#include <iostream>` and
+`net.cc` has no `#include <map>`/`#include <string>` at a512f42c. Patch
+restored (BUILD-FIXES #181).
 
 ### 117. TheRock kpack split_artifacts.py missing `zstandard` Python module
 
@@ -2207,8 +2243,10 @@ python but omits `zstandard`. TheRock's own `requirements.txt` declares
 CMake Error at .../build/media-libs/rocdecode/build/rocdecode-config.cmake:28:
   File or directory .../build/include referenced by rocdecode_INCLUDE_DIR does not exist!
 ```
-Occurs even with Patches #19/#20 applied (rocdecode in RUNTIME_DEPS,
-media-libs before profiler) and CMake Package Registry manually cleared.
+Occurs when rocdecode/rocjpeg are enabled (Patch #16/#17, currently disabled).
+With #16/#17 disabled, rocprofiler-sdk uses its built-in fallback
+(`ROCPROFILER_SDK_USE_SYSTEM_ROCDECODE=0`) and this issue does not arise.
+Patch #18 remains independently useful.
 
 **Root cause**: TheRock's dependency provider
 (`therock_subproject_dep_provider.cmake:121`) rewrites `find_package()` calls
@@ -2254,9 +2292,12 @@ because CMake interprets `#` as a comment character in unquoted list
 items, so `-Wno-#warnings` (unquoted) becomes `-Wno-` in the generated
 build.ninja, which is a no-op.
 
-**Patch**: `patches/miopen-ciso646-warnings.patch` (YAML #14) — **OBSOLETE**:
-The `-Wno-#warnings` flag is already present in the pinned TheRock commit
-`a512f42c`. Patch file and YAML entry removed.
+**Patch**: `patches/miopen-ciso646-warnings.patch` (YAML #24).
+
+**b50ef58 regression**: Commit b50ef58 erroneously marked this OBSOLETE
+claiming `-Wno-#warnings` was already present in upstream a512f42c.
+Source verification confirmed `EnableCompilerWarnings.cmake` at a512f42c
+has no `-Wno-#warnings`. Patch restored (BUILD-FIXES #181).
 
 ### 120. TheRock overbuilds: rccl for 23 architectures, unnecessary components enabled
 
@@ -2333,7 +2374,7 @@ but nested CMake sub-builds (LLVM runtimes, hip-clr, amd-mesa) can inherit
 **Fix**: Add `CC CXX` to the `unset` command in `configure_therock()`.
 `_vllm_source_env` at the end of the function restores them.
 
-### 123. rccl-iostream-include.patch fails — CRLF line endings in ipc_init.cu — **SUPERSEDED**
+### 123. rccl-iostream-include.patch fails — CRLF line endings in ipc_init.cu
 
 **File:** `patches/rccl-iostream-include.patch`
 
@@ -2351,9 +2392,9 @@ uses for validation.
 produces correct CRLF context lines for `ipc_init.cu` and includes `index`
 lines with blob hashes. Prepend the copyright header comment.
 
-**Status**: **OBSOLETE** — The underlying patch (BUILD-FIXES #116) was
-removed because the fix is already included in the pinned TheRock commit
-`a512f42c`. This CRLF workaround is moot.
+**Status**: Patch regenerated from `rocm-systems` submodule with correct
+CRLF context lines and `rocm-systems/` path prefix. `ipc_init.cu` still
+has CRLF at a512f42c. Applies cleanly (BUILD-FIXES #116 restored).
 
 ### 124. hip-clr configure fails — CppHeaderParser missing in pre-existing venv
 
@@ -4268,11 +4309,12 @@ before reading expert weight matrices — directly saving memory
 bandwidth on UMA. Option D: SER is disabled when `n_rows > 8` (PP
 path) to avoid sentinel handling in the non-Vector path.
 
-**5 review rounds**: Review 1 (REJECT — Vector OOB, late-softmax,
+**6 review rounds**: Review 1 (REJECT — Vector OOB, late-softmax,
 push-const syntax), Review 2 (APPROVE WITH CHANGES — line numbers,
 argsort offsets), impl1 (4 implementation bugs), GPT-5.6 (3 runtime
 blockers: data race, infinite loop, unconditional memset), end-to-end
-trace (no new issues, 9 key verifications).
+trace (no new issues, 9 key verifications), logical review + hardening
+(20/20 PASS, 2 latent gaps fixed: scale-bias gate, BF16 weight-type gate).
 
 **Safety hardening**:
 - Vector `mul_mat_id`: `get_offsets()`→`bool`, `tid==0` zero-write
@@ -4281,8 +4323,10 @@ trace (no new issues, 9 key verifications).
   bounds-check + zero-write
 - `get_rows.comp`/`get_rows_quant.comp`: sentinel guard with `gid_y +=`
   before `continue` (prevents infinite loop in grid-stride loop)
-- Option D: SER disabled when `n_rows > 8` — no sentinels at PP,
-  no pre-zero needed, zero PP overhead
+- Option D: SER disabled when `n_rows > 8` OR `output_bias != 0`
+  (scale-bias fusion) — no sentinels at PP, no pre-zero needed, zero
+  PP overhead. Scale-bias models (deepseek2/nemotron-style) excluded:
+  a pruned expert would otherwise get weight `output_bias != 0`.
 - `topk_moe.comp`: threshold on unbiased `max_val` (not biased
   `max_val_s`), `GATING_FUNC_SOFTMAX_WEIGHT` guard (no SER for
   late-softmax), `-INFINITY` marking always (prevents duplicate
@@ -4294,8 +4338,9 @@ trace (no new issues, 9 key verifications).
 **Known limitations** (non-blocking for Qwen3.6):
 - BF16 weights excluded from Vector path by
   `ggml_vk_use_mul_mat_vec_id` → SER would produce sentinels reaching
-  non-Vector path without pre-zero. Future fix: gate SER on weight type
-  in `build_moe_ffn`.
+  non-Vector path without pre-zero. RESOLVED: weight-type gate
+  (`ser_bf16`) in `build_moe_ffn` disables SER for `GGML_TYPE_BF16`
+  expert weights.
 - CPU special paths (`repack.cpp:4461`, `spacemit/ime.cpp:677`) still
   assert on sentinel IDs. SER is fused-Vulkan-only; sentinels never
   reach CPU in normal operation.
@@ -4312,13 +4357,13 @@ trace (no new issues, 9 key verifications).
 | Patch | Files | Lines |
 |-------|-------|-------|
 | `ser-ggml.patch` | `ggml.h`, `ggml.c`, `ggml-cpu.c` | 72 |
-| `ser-llama.patch` | `llama.h`, `llama-cparams.h`, `llama-context.cpp`, `llama-graph.cpp` | 94 |
+| `ser-llama.patch` | `llama.h`, `llama-cparams.h`, `llama-context.cpp`, `llama-graph.cpp` | 101 |
 | `ser-common.patch` | `common.h`, `common.cpp`, `arg.cpp` | 60 |
 | `ser-vulkan.patch` | `ggml-vulkan.cpp`, `ops.cpp`, `topk_moe.comp`, `mul_mat_vec_base.glsl`, 14× `mul_mat_vec_*.comp`, `add_id.comp`, `get_rows.comp`, `get_rows_quant.comp` | 618 |
 
 **YAML**: #56-#59 (4 new entries in `llama.cpp` package).
 **Verified**: All 17 patches (13 existing + 4 SER) apply cleanly together
-against upstream `a4107133a`. End-to-end trace completed (5 review rounds).
+against upstream `a4107133a`. End-to-end trace completed (6 review rounds).
 Live-tested on Vulkan: `--ser 4,0.2` produces coherent output, ~0.5-1.5 t/s
 speedup on Qwen3.6-35B-A3B IQ4_NL.
 **Build required**: `./build-vllm.sh --step 33 --force-rebuild llamacpp`
@@ -4369,6 +4414,16 @@ the `warning_once` path is never reached.
 Keep `logger.debug(...)` which does not trigger the import chain.
 
 **Patch**: `patches/wsl2-rocm-gcn-arch-circular-import.patch` (YAML #44).
+
+**Note**: Earlier versions of this patch also modified
+`use_rocm_custom_paged_attention()` (gfx1151 gate, line 356) and
+`supports_fp8()` (on_gfx1x, line 872). Those changes are now covered
+by YAML sed entry #13 (paged-attn gating — see vLLM #13 description)
+and patch file #23 `fp8-support-gfx1x.patch` (BUILD-FIXES #174)
+respectively, and were removed from this patch to avoid duplicates
+that broke `git apply --check` idempotency on Step 20b resume. The
+patch now contains only the `warning_once` removal (the actual
+circular-import fix). Final `rocm.py` state is unchanged.
 
 ### 178. WSL2 UVA False Negative: pin_memory=False Blocks StagedWriteTensor (vllm/45)
 
@@ -4568,3 +4623,377 @@ rocr-runtime codebase — it assumes KFD interrupt wait always works.
 The fix is WSL2-specific in practice but correct on all platforms — a
 1ms sleep when polling without HW interrupts is a standard cooperative
 backoff pattern.
+
+### 181. b50ef58 regression — 4 TheRock patches incorrectly removed
+
+**Commit**: `b50ef58` (Jul 3 2026, "fix: remove 4 obsolete TheRock patches")
+
+**Symptom**: Fresh `--rebuild` fails at rocBLAS configure with
+`therock_explicit_finders.cmake` FATAL_ERROR on `roctracer/roctx.h`.
+
+**Root cause**: Commit b50ef58 removed 4 patches (#110, #112, #116, #119)
+claiming they were "already included in pinned commit a512f42c". Source
+verification against a512f42c confirmed **none** of the 4 fixes are
+present:
+
+| # | Patch | Fix in a512f42c? | Impact |
+|---|---|---|---|
+| #110 | rocblas-roctx-gating | NO — `if(BUILD_SHARED_LIBS)` without `AND ROCTX` | rocBLAS configure FATAL_ERROR |
+| #112 | rocr-blit-device-libs | NO — no `AMDDeviceLibs`/`--rocm-device-lib-path` | Fragile blit kernel bootstrap |
+| #116 | rccl-iostream-include | NO — no `<iostream>`/`<map>`/`<string>` | RCCL build compile errors |
+| #119 | miopen-ciso646-warnings | NO — no `-Wno-#warnings` | MIOpen `-Werror` on ciso646 |
+
+The smoke test in b50ef58 passed only because TheRock was cached (`local/`
+from a pre-b50ef58 build) — `configure_therock()` skipped reconfigure.
+Same pattern as BUILD-FIXES #115.
+
+**Fix**: All 4 patches restored as YAML #21-#24. #116 regenerated for
+upstream namespace rename (`nccl_dda_ipc_detail` → `nccl_dda_detail`)
+and CRLF line endings. #123 (CRLF workaround) un-superseded.
+
+**Lesson**: Patch obsoletion requires a clean `--rebuild` verification,
+not just a smoke test with cached artifacts.
+
+### 182. AOTriton pip-install Triton overlay picks TheRock LLVM — missing NVPTX targets
+
+**File:** `build-vllm.sh` (`build_aotriton()`, line 2209)
+
+**Symptom**: `pip install third_party/triton` during AOTriton build
+(Step 18) fails at `find_package(MLIR)` in Triton's
+`CMakeLists.txt:217`:
+
+```
+CMake Error at CMakeLists.txt:217 (find_package):
+  Found package configuration file:
+    /home/bosadm/.triton/llvm/llvm-7f77ca0d-ubuntu-x64/lib/cmake/mlir/MLIRConfig.cmake
+  but it set MLIR_FOUND to FALSE so package "MLIR" is considered to be NOT
+  FOUND.  Reason given by package:
+  The following imported targets are referenced, but are missing:
+  LLVMNVPTXCodeGen LLVMNVPTXDesc LLVMNVPTXInfo
+```
+
+**Root cause**: Triton's `MLIRConfig.cmake` calls
+`find_package(LLVM 23.0.0 EXACT REQUIRED CONFIG HINTS ...)` with HINTS
+pointing at Triton's pre-built LLVM (cached under
+`~/.triton/llvm/<llvm-hash>-ubuntu-x64/`). In CONFIG mode CMake
+searches in this order:
+
+1. `<PackageName>_DIR` cache variable
+2. `CMAKE_PREFIX_PATH`, `CMAKE_FRAMEWORK_PATH`, `CMAKE_APPBUNDLE_PATH`
+3. `CMAKE_PACKAGE_REGISTRY`
+4. **HINTS**
+5. System package registry
+6. Default paths derived from `PATH`
+
+`LLVM_DIR` is not explicitly set by Triton's third-party-vars file
+(only `LLVM_INCLUDE_DIRS`, `LLVM_LIBRARY_DIR`, `LLVM_SYSPATH` are
+populated from the pre-built package). Because `vllm-env.sh` exports
+`PATH="${ROCM_PATH}/lib/llvm/bin:${ROCM_PATH}/bin:${PATH}"` (it puts
+TheRock's `amdclang` and friends first), CMake's default PATH search
+(Step 6) finds the LLVMConfig.cmake inside our TheRock install tree at
+`/opt/src/vllm/local/lib/cmake/llvm/` and caches
+`LLVM_DIR=/opt/src/vllm/local/lib/cmake/llvm` *before* the `HINTS`
+in `MLIRConfig.cmake` are even consulted.
+
+TheRock's LLVM is configured with
+`LLVM_TARGETS_TO_BUILD="AMDGPU;SPIRV;X86"` (verified via
+`/opt/src/vllm/local/lib/llvm/bin/llvm-config --targets-built`).
+Triton's pre-built LLVM instead ships `AMDGPU NX NVPTX SPIRV X86` (see
+`~/.triton/llvm/llvm-7f77ca0d-ubuntu-x64/lib/cmake/llvm/LLVMExports.cmake`
+containing `LLVMNVPTXCodeGen/LLVMNVPTXDesc/LLVMNVPTXInfo`).
+
+Triton requires the NVPTX backend at link time because
+`TRITON_CODEGEN_BACKENDS=amd;nvidia` (BUILD-FIXES #132 — Triton core
+links NVIDIA DialectNVWS + `TritonNVIDIAGPUToLLVM` whose MLIR targets
+pull in `MLIRNVVMDialect`, `MLIRGPUToNVVMTransforms`,
+`MLIRLLVMIRToNVVMTranslation`, etc. — each of which references
+`LLVMNVPTXCodeGen/LLVMNVPTXDesc/LLVMNVPTXInfo` from the underlying
+LLVM).
+
+Step 15 (`build_triton`) does not exhibit the bug because Sub-process
+runs from the `triton_pkg_dir` directly (no inherited PATH seeding),
+while Step 18 (`build_aotriton`) runs `pip install .` from inside
+the AOTriton source tree where the parent agent (via
+`_vllm_source_env`) has seeded `PATH` with TheRock's bin directory.
+Even so, the fix below is path-independent — the explicit `-DLLVM_DIR`
+on the cmake command line is honored by CMake before the PATH search
+runs.
+
+**Fix**: Append `-DLLVM_DIR=~/.triton/llvm/llvm-ubuntu-x64/lib/cmake/llvm`
+to `TRITON_APPEND_CMAKE_ARGS` for `build_aotriton()`. `llvm-ubuntu-x64`
+is the stable symlink created by `get_llvm_package_info` in
+`python/build_helpers.py`; it always points at the currently-pinned
+`llvm-<hash>-ubuntu-x64/` extracted from the Triton upstream tarball.
+Passing `LLVM_DIR` on the cmake command line caches it before
+`find_package(MLIR CONFIG)` invokes `find_package(LLVM CONFIG HINTS ...)`,
+forcing CMake to take the pre-built Triton LLVM (with NVPTX) rather
+than letting PATH-based default search resolve TheRock's LLVM (without
+NVPTX).
+
+```bash
+export TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF \
+    -DLLVM_ENABLE_WERROR=OFF \
+    -DLLVM_DIR=${HOME}/.triton/llvm/llvm-ubuntu-x64/lib/cmake/llvm"
+```
+
+**Trade-off**: None. TheRock's LLVM remains in `PATH` for compilation
+(CLANG/LLD tools used by `amdclang++`). Only the CMake `find_package`
+resolution for the Triton-MLIR link step is redirected.
+
+**Related**: #132 (Loads NVIDIA backend, requires NVPTX at MLIR link
+time). #9, #10 (Other Triton-MLIR integration fixes from
+post-install-time MLIR/CMake exports).
+
+### 183. Dirty working tree breaks clone_pkg checkout on resume — missing clean_generated flag
+
+**File:** `vllm-packages.yaml` (per-package entries), `build-vllm.sh`
+(`clone_pkg()`, lines 691-697)
+
+**Symptom**: Resuming a build with `./build-vllm.sh` (no `--step`)
+fails inside `clone_pkg()` when fetching an already-cloned repository.
+After `git fetch origin <branch>`, the subsequent `git checkout
+<branch>` aborts:
+
+```
+error: Your local changes to the following files would be overwritten
+by checkout:
+    <patched file(s)>
+Please commit your changes or stash them before you switch branches.
+Aborting
+```
+
+The error surface varies by package: TheRock breaks at Step 1
+(`compiler/pre_hook_amd-llvm.cmake`, `math-libs/BLAS/CMakeLists.txt`,
+`ml-libs/CMakeLists.txt`); Triton breaks at Step 14
+(`CMakeLists.txt`); AOTriton at Step 17; Flash Attention at Step 26;
+AOCL-LibM at the direct `clone_pkg` call; Lemonade at Step 33; etc.
+
+**Root cause**: Any package that applies in-tree patches via
+`apply_patches <pkg_key>` during its build step (`build_triton`,
+`build_aotriton`, `build_therock`, the Phase F post-build patch list,
+etc.) leaves the source tree dirty after a successful build. The
+patch wrappers (`git apply` for `type: patch`, `sed -i` for
+`type: sed`, `file_rewrite` for `type: file_rewrite`) modify tracked
+files in-place as un-committed working-tree modifications.
+
+On the next `./build-vllm.sh` resume, `clone_pkg()` (invoked either
+from a YAML step entry `{clone: <pkg>}` or directly via
+`clone_pkg <pkg> ...` inside a build function) finds the existing
+clone, attempts `git checkout <branch>` to fast-forward, and Git
+refuses because the dirty tree conflicts with the branch tip — even
+when the pinned commit equals the current `HEAD` and no actual pull
+is needed.
+
+**Mechanism**: `clone_pkg()` honours an optional per-package flag
+`clean_generated: true` in the YAML entry. When set, the clone
+dispatcher runs (before any branch switch):
+
+```bash
+if [[ "${clean_generated}" == "true" ]]; then
+    local dirty_count
+    dirty_count="$(git status --short | wc -l)"
+    if [[ "${dirty_count}" -gt 0 ]]; then
+        info "Resetting ${dirty_count} generated files in ${description} tree..."
+        git checkout -- .
+        git submodule foreach --recursive 'git checkout -- . 2>/dev/null || true'
+    fi
+fi
+```
+
+This wipes in-tree patch artefacts and recursive submodule dirtiness
+*before* `git fetch`, `git checkout <branch>`, and
+`git checkout <pinned commit>` run. `should_skip_step` (which only
+checks `skip_marker` / `skip_check` artefacts under `LOCAL_PREFIX`)
+is unaffected and continues to short-circuit the actual build when
+install artefacts exist.
+
+**Audit**: Every package reachable through `clone_pkg` and touched by
+in-tree patches was audited. Six packages needed the flag added —
+`therock`, `aocl_libm`, `triton`, `aotriton`, `flash_attention`,
+`lemonade`. Three already had the flag from earlier development
+(`pytorch`, `vllm`, `llamacpp`). Packages without in-tree patches
+(`aocl_utils`, `torchvision`, `cpython`, `venv`, `aiter` — the latter
+reached only via `rebuild_aiter`, not `clone_pkg`) did not need it.
+
+| Package              | clone_pkg | In-tree patches                | clean_generated |
+|----------------------|:---------:|:-------------------------------|:----------------:|
+| `therock`            | Step 1    | #110, #112, #116, #119, #123 + sed | **added** (183) |
+| `aocl_utils`         | Direct    | 0                              | n/a             |
+| `aocl_libm`         | Direct    | 2 sed                          | **added** (183) |
+| `cpython`            | —         | —                              | n/a             |
+| `venv`               | —         | —                              | n/a             |
+| `pytorch`            | Step 9    | 2 sed                          | already set     |
+| `torchvision`        | Step 12   | 0                              | n/a             |
+| `triton`             | Step 14   | 2 sed (Werror, AttrsDescriptor) | **added** (183) |
+| `aotriton`           | Step 17   | 1 sed (rebase pick line)       | **added** (183) |
+| `vllm`               | Step 19   | 2 patch/sed                    | already set     |
+| `flash_attention`    | Step 26   | 1 file_rewrite                 | **added** (183) |
+| `aiter`              | — (rebuild_aiter, not clone_pkg) | 4             | n/a             |
+| `llamacpp`           | Direct (Step 33) | 1                       | already set     |
+| `lemonade`           | Direct (Step 33) | 1 sed                   | **added** (183) |
+
+**Fix**: Add `clean_generated: true` to each of the six YAML entries
+listed above (inserted either between the `skip_check:` block and the
+following field, or between `skip_marker:` and `patches:` for Lemonade
+which has no `skip_check`). Example diff for `triton`:
+
+```yaml
+  triton:
+    repo: "https://github.com/ROCm/triton.git"
+    branch: "main_perf"
+    commit: "0ec280cf80dd91e9a86887981a670f2d4541a32b"
+    src_dir: "triton"
+    validate_remote: "ROCm/triton"
+    method: pip
+    phase: D
+    steps: [14, 15, 16]
+    depends_on: [therock, pytorch]
+    compiler: amdclang
+    skip_marker: null
+    skip_check:
+      type: wheel
+      pattern: "triton*.whl"
+      import_cmd: "import triton; print(triton.__version__)"
+    clean_generated: true                       # <- added
+    build_dependencies:
+      - pybind11
+    ...
+```
+
+**Trade-off**: On each resume, `clone_pkg()` resets all patch
+modifications before fetching. Each respective build step will
+re-apply its patches unconditionally — a sub-second cost since the
+patch files are small and `git apply --check` /
+`marker_absent`/`marker_present` short-circuit any already-applied
+ones in the unlikely case the build step is re-entered with patches
+still present. No build artifacts are touched; `local/` install tree
+and `build/` ninja artefacts survive the clean. Idempotent skip via
+`should_skip_step` (which checks `skip_marker` / `skip_check`
+artefacts under `LOCAL_PREFIX`) is unaffected.
+
+Idempotency of `apply_patches` is intact: `type: patch` entries run
+`git apply --reverse --check` first, skipping if the patch is already
+present; `type: sed` entries check a `marker` /
+`marker_absent`/`marker_present` predicate before running
+`sed -i`; `type: file_rewrite` entries likewise gate on markers.
+So the clean → re-apply cycle on each resume is safe and matches the
+long-standing behaviour of `pytorch` / `vllm` / `llamacpp`.
+
+**Related**: #110, #112, #116, #119, #123 (TheRock source patches
+whose effects dirty the tree). #181 (Restoration of four accidentally
+removed TheRock patches — same list, related patch-set). TheRock
+dirty-tree cases observed live; the Triton `CMakeLists.txt -Werror`
+removal and AOTriton submodule dirty flags observed live in the test
+run that preceded this fix.
+
+### 184: AITER-meta allowed_archs missing gfx1151
+
+**Symptom**: vLLM EngineCore fails during profiling/warmup on gfx1151
+when serving a generation model (not pooling). The AITER top-k/top-p
+sampler is selected for the dummy profiling run (which uses
+`temperature=0.5`, not greedy), triggering JIT compilation of the
+AITER-meta sampling kernel. The JIT path calls
+`validate_and_update_archs()` which asserts that the GPU architecture is
+in an allowed list:
+
+```
+AssertionError: One of GPU archs of ['gfx1151'] is invalid or not supported
+```
+
+**Root Cause**: `aiter_meta/csrc/cpp_itfs/utils.py:validate_and_update_archs()`
+has an `allowed_archs` list that only includes CDNA architectures
+(`gfx90a`, `gfx940`, `gfx941`, `gfx942`, `gfx950`). gfx1151 (RDNA 3.5)
+is missing. The parallel list in `aiter/jit/core.py` (used for the
+prebuilt AITER module kernels) already includes `gfx1151` — this is a
+copy-paste omission in `aiter_meta`.
+
+**Fix**: Add `gfx1151` to the `allowed_archs` list. The AITER-meta
+sampling kernel (`top_k_top_p_sampling_from_probs`) uses only
+`hipcub`/`hiprand` (wave32-aware via `rocprim::warp_size()`), not
+CDNA-specific intrinsics. The deterministic code path is written for
+wave32 (hardcoded 32-lane arithmetic in `DeterministicInclusiveSum`).
+No CDNA MFMA assembly, no DPP crosslane operations, no wave64
+assumptions.
+
+**Note**: This issue only manifests with generation models (chandra-ocr-2,
+Qwen3.6-35B). Pooling models (Embed, Reranker) never invoke the sampler —
+the AITER-meta JIT path is never reached. At runtime with
+`temperature=0.0` (greedy decoding), the sampler is also bypassed
+(`sampler.py` returns before `topk_topp_sampler` is called). The crash
+is purely in the vLLM profiling/warmup dummy run.
+
+**Patch**: `vllm-packages.yaml` → aiter package, patch #5 (sed on installed
+`aiter_meta/csrc/cpp_itfs/utils.py`).
+
+### 185. Lemonade APU VRAM monitor ignores GTT — eviction engine pressure metric meaningless
+
+**File:** `/opt/src/vllm/patches/lemonade-apu-vram-gtt.patch`
+
+**Symptom**: Lemonade's eviction engine fires constantly on Strix Halo
+APU because VRAM usage is always ~100% (48/48 GB BIOS carveout). The
+pressure metric is meaningless, causing the eviction engine to either
+fire uselessly or fail to find candidates during real memory pressure
+(system RAM exhaustion).
+
+**Root cause**: `get_global_vram_usage_pct()` in `system_info.cpp` only
+reads `mem_info_vram_used / mem_info_vram_total`. On Strix Halo APU,
+GTT (Graphics Translation Table, backed by system RAM, up to 23 GB) is
+the real pressure indicator but is not included in the ratio. VRAM is
+always full (48 GB carveout is the only allocatable pool via `hipMalloc`),
+making the VRAM-only ratio permanently ~1.0.
+
+**Fix**: For APU systems (no `board_info` file in sysfs device path),
+include GTT in the ratio calculation: `(vram_used + gtt_used) /
+(vram_total + gtt_total)`. For dGPUs (has `board_info`), keep the
+VRAM-only calculation unchanged. The `board_info` file is present on
+discrete GPUs and absent on integrated GPUs.
+
+### 186. VL Checkpoint-Restore Guard — "Chunk not found" Crash on Multimodal Requests
+
+**File:** `${VLLM_DIR}/patches/hybrid-attn-server.patch` (server-context.cpp)
+
+**Symptom**: Vision/multimodal requests crash with `got exception: Chunk not
+found` when the server restores a context checkpoint created by a prior
+request with a different image. The LCP token-ID match reports `sim_best =
+1.000` (placeholder tokens are identical), but the image chunks referenced
+by the restored KV positions do not exist in the new request's
+`map_idx_to_media`.
+
+**Root cause**: The checkpoint restore paths (standard at `pos_min >=
+pos_min_thold` and the `needs_reeval` recurrent-state path) do not check
+whether the incoming request contains multimodal content. Checkpoint
+creation correctly avoids post-mtmd positions (`do_checkpoint && !has_mtmd`,
+line 3770), but a checkpoint created *before* an image in a prior text-only
+batch can still be restored into a new request where the image content
+differs, causing token-index/chunk-map misalignment in
+`server_tokens::find_chunk()` (server-common.cpp:345).
+
+Additionally, for hybrid/recurrent models the accumulated recurrent state
+includes contributions from prior image embeddings. Partial reuse of the
+text-prefix KV cache without restoring the matching recurrent state produces
+silent corruption. Full re-evaluation is the only safe path.
+
+**Fix** (3 guards in server-context.cpp):
+
+1. **Hybrid-VL early guard** (after LCP matching): if
+   `input_tokens.has_mtmd && needs_reeval`, set `n_past = 0` to force full
+   re-evaluation. The recurrent state cannot be partially reused across
+   different image embeddings.
+
+2. **Standard checkpoint-restore guard**: add `&& !input_tokens.has_mtmd`
+   to the `pos_min >= pos_min_thold` condition. Prevents restoring an
+   attention KV checkpoint that references stale image chunk positions.
+
+3. **needs_reeval checkpoint-restore guard**: add `&& !input_tokens.has_mtmd`
+   to the recurrent-state restore condition. Defense-in-depth (redundant
+   with guard 1 for hybrid models, but protects the path explicitly).
+
+**Impact**: Text-only requests on VL-capable models are unaffected
+(`input_tokens.has_mtmd` is request-level, not model-level). Hybrid-VL
+requests lose prompt caching (equivalent to `cache_prompt=false`).
+Non-hybrid VL requests retain LCP text-prefix caching but skip checkpoint
+restore.
+
+**Upstream status**: Not submitted. The existing KV-shift cache-reuse path
+already gates on `!slot.prompt.tokens.has_mtmd` (line 3335); this fix
+extends the same pattern to the checkpoint restore paths.

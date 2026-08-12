@@ -3,7 +3,7 @@ diff --git a/vllm/platforms/rocm.py b/vllm/platforms/rocm.py
 index 04c1acbb2..999bdb87a 100644
 --- a/vllm/platforms/rocm.py
 +++ b/vllm/platforms/rocm.py
-@@ -194,11 +194,6 @@ def _get_gcn_arch() -> str:
+@@ -194,10 +194,5 @@ def _get_gcn_arch() -> str:
          return _query_gcn_arch_from_amdsmi()
      except Exception as e:
          logger.debug("Failed to get GCN arch via amdsmi: %s", e)
@@ -14,22 +14,3 @@ index 04c1acbb2..999bdb87a 100644
 -        )
      # Ultimate fallback: use torch.cuda (will initialize CUDA)
      return torch.cuda.get_device_properties("cuda").gcnArchName
- 
-@@ -356,7 +351,7 @@ def use_rocm_custom_paged_attention(
- ) -> bool:
-     # custom paged attn always supported on V0. On V1, requires sliding window
-     # disabled due to observed numerical discrepancy.
--    if _ON_GFX9:
-+    if _ON_GFX9 or ("gfx1151" in _GCN_ARCH):
-         return (
-             (sliding_window == 0 or sliding_window == (-1, -1))
-             and (qtype == torch.half or qtype == torch.bfloat16)
-@@ -869,7 +864,7 @@ class RocmPlatform(Platform):
- 
-     @classmethod
-     def supports_fp8(cls) -> bool:
--        return on_gfx9() or on_gfx12x()
-+        return on_gfx9() or on_gfx12x() or on_gfx1x()
- 
-     @classmethod
-     def is_fp8_fnuz(cls) -> bool:

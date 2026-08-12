@@ -1,0 +1,13 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/rocm-libraries/projects/miopen/cmake/EnableCompilerWarnings.cmake b/rocm-libraries/projects/miopen/cmake/EnableCompilerWarnings.cmake
+index c83da3f84af..1a0f2fc1885 100644
+--- a/rocm-libraries/projects/miopen/cmake/EnableCompilerWarnings.cmake
++++ b/rocm-libraries/projects/miopen/cmake/EnableCompilerWarnings.cmake
+@@ -57,6 +57,7 @@ set(__cxx_compile_options
+ 
+ set(__clang_cxx_compile_options
+     -Wno-unused-command-line-argument
++    "-Wno-#warnings"
+     -Wthread-safety
+     -Wshift-sign-overflow
+     -Winconsistent-missing-destructor-override

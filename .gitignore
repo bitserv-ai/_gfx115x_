@@ -42,8 +42,11 @@ node_modules/
 Thumbs.db
 
 # bitserv-ai internal (not for publication)
-testing/
+tests/
 techdoc/
 workdoc/
 deploy/
+deploy.old/
+debug/
+CONTRIBUTING.md
 TODO.md

@@ -40,6 +40,7 @@ Prerequisites:
 Usage:
   source /opt/src/vllm/.venv-quantize/bin/activate
   python quantize_w8a16.py --model embedding
+  python quantize_w8a16.py --model embedding-2b
   python quantize_w8a16.py --model reranker
   python quantize_w8a16.py --model both
 """
@@ -80,6 +81,11 @@ MODELS = {
     "embedding": {
         "input": os.path.join(default_model_path, "Qwen3-VL-Embedding-8B"),
         "output": os.path.join(default_model_path, "Qwen3-VL-Embedding-8B-W8A16"),
+        "ignore": ["lm_head", "re:.*visual.*"],
+    },
+    "embedding-2b": {
+        "input": os.path.join(default_model_path, "Qwen3-VL-Embedding-2B"),
+        "output": os.path.join(default_model_path, "Qwen3-VL-Embedding-2B-W8A16"),
         "ignore": ["lm_head", "re:.*visual.*"],
     },
     "reranker": {
@@ -234,7 +240,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        choices=["embedding", "reranker", "both"],
+        choices=["embedding", "embedding-2b", "reranker", "both"],
         required=True,
         help="Which model(s) to quantize",
     )
