@@ -4997,3 +4997,48 @@ restore.
 **Upstream status**: Not submitted. The existing KV-shift cache-reuse path
 already gates on `!slot.prompt.tokens.has_mtmd` (line 3335); this fix
 extends the same pattern to the checkpoint restore paths.
+
+---
+
+### 187. cache-reuse Hybrid Guard — Recurrent-State Corruption via KV-Shift Reuse
+
+**File:** `${VLLM_DIR}/patches/hybrid-attn-server.patch` (server-context.cpp)
+
+**Symptom**: Potential silent corruption on hybrid GDN models (Qwen 3.6
+27B/35B-A3B) if `--cache-reuse N` or the per-request API parameter
+`n_cache_reuse` is ever set. Not set in any recipe today — the guard is
+defensive.
+
+**Root cause**: `--cache-reuse` (upstream PR #9866) reuses prompt chunks
+beyond the LCP by K-shifting their KV cells into the new position via
+`seq_rm`+`seq_add`. On hybrid models the gate `llama_memory_can_shift()`
+consults only the ATTENTION part (`llama-memory-hybrid.cpp:133-136`), so
+the feature silently activates on Qwen 3.6. The recurrent state (one
+accumulated cell per sequence) cannot be shifted by construction:
+
+- **Gap > n_rs_seq=4 (the common case):** recurrent seq_rm fails →
+  `cell_zero` → prefill starts from a zeroed state; the recurrent layers
+  (~3 of every 4) never see the system-prompt tail nor the reused chunks —
+  strictly worse than no cache-reuse.
+- **Gap ≤ 4:** snapshot rollback keeps the OLD state → cross-conversation
+  contamination.
+- Additionally, reuse breaks the position invariant of our checkpoint
+  prune/restore logic (`server-context.cpp:3511-3565`) → old-conversation
+  checkpoints with a wrong recurrent state can be restored (poisoning
+  persists through the RAM prompt cache).
+
+**Fix** (1 guard in server-context.cpp): extend `can_cache_reuse` with
+`&& !needs_reeval` (analogous to the existing `has_mtmd` gate, #186).
+`needs_reeval` is true exactly for recurrent/hybrid models
+(`llama_model_is_recurrent || llama_model_is_hybrid`, line 1183). The
+existing `SLT_WRN` ("cache reuse is not supported - ignoring
+n_cache_reuse") then fires correctly.
+
+**Impact**: Zero in production (`n_cache_reuse` is not set anywhere;
+default 0). The actual agent use case (identical system prompt) is already
+covered by LCP + slot affinity + the 8 GB RAM prompt cache. Protects
+against the per-request API parameter (`server-schema.cpp:67-69`).
+
+**Upstream status**: Not submitted. Upstream has not changed cache-reuse
+between our pin and master; no hybrid gate in sight. Details:
+`workdoc/codebase-audit-2026-08.md` §5.1.

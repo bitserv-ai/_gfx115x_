@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **cache-reuse hybrid guard** (#187): Gate KV-shift chunk reuse on
+  `!needs_reeval`. On hybrid GDN models (Qwen 3.6) the recurrent state
+  cannot be relocated by `seq_rm`+`seq_add` — reuse would leave it zeroed
+  (gap > n_rs_seq) or contaminated by the old conversation, and breaks the
+  checkpoint-pruning position invariant. Defensive: `n_cache_reuse` is not
+  set in any recipe, but the per-request API parameter could trigger it.
+
 ## [0.5.3] - 2026-08-12
 
 Build hardening, SER for Vulkan MoE, WSL2 deploy support, VL checkpoint

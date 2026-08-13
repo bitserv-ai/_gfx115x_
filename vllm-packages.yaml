@@ -2072,7 +2072,8 @@ packages:
           anchor-tracking checkpoint strategy, PARTIAL_ONLY for draft state,
           send_error null-safe, prompt.checkpoints.clear(), VL
           checkpoint-restore guard (has_mtmd gates on both restore paths,
-          hybrid-VL forced full re-eval).
+          hybrid-VL forced full re-eval), cache-reuse guard (needs_reeval
+          disables KV-shift chunk reuse - recurrent state cannot be shifted).
 
       # 4i. Server task: draft prompt-cache load flags fix.
       - type: patch
