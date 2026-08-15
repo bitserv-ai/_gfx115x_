@@ -64,7 +64,7 @@ index c555831ce..9253c73c7 100644
          ggml_vec_cpy_f32(nc,
                  (float *) ((char *)  dst->data + i10*nb1  + i11*nb2  + i12*nb3),
 diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-index c0ab9f1c6..042b7d8a2 100644
+index c0ab9f1c6..bd43ca442 100644
 --- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 +++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 @@ -1158,6 +1158,7 @@ struct vk_mat_vec_id_push_constants {
@@ -149,6 +149,21 @@ index c0ab9f1c6..042b7d8a2 100644
      GGML_ASSERT(n_expert_used <= n_experts);
  
      const uint32_t rows_per_block = 4;
+@@ -12908,6 +12937,14 @@ static void ggml_vk_rope(ggml_backend_vk_context * ctx, vk_context& subctx, cons
+ static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+     const uint32_t * op_params = (const uint32_t *)dst->op_params;
+ 
++    if (op_params[1] != 0) {
++        static bool ser_fusion_warned = false;
++        if (!ser_fusion_warned) {
++            ser_fusion_warned = true;
++            GGML_LOG_WARN("ggml_vulkan: SER params present but topk_moe fusion did not fire; SER has no effect\n");
++        }
++    }
++
+     uint32_t ncols = src0->ne[0];
+     uint32_t nrows = ggml_nrows(src0);
+ 
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp b/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp
 index 495249d5f..22def8daa 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp
@@ -179,14 +194,14 @@ index 495249d5f..22def8daa 100644
      const uint s2 = p.ne0 * p.ne1;
  
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp b/ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp
-index e88bdd057..4c71c65e7 100644
+index e88bdd057..fc221c49c 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp
 @@ -22,6 +22,13 @@ void main() {
  
              const uint i01 = data_b[get_boffset() + i10*p.nb10 + i11*p.nb11 + i12*p.nb12];
  
-+            if (i01 == 0xFFFFFFFFu) {
++            if (i01 >= p.ne01) {
 +                const uint d_offset_zero = get_doffset() + i10*p.nb21 + i11*p.nb22 + i12*p.nb23;
 +                data_d[d_offset_zero + i00] = D_TYPE(0.0f);
 +                gid_y += gl_WorkGroupSize.y * gl_NumWorkGroups.y;
@@ -197,19 +212,31 @@ index e88bdd057..4c71c65e7 100644
              const uint d_offset = get_doffset() + i10*p.nb21 + i11*p.nb22 + i12*p.nb23;
  
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp b/ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp
-index 9dba437ed..49e644716 100644
+index 9dba437ed..324ba0cc4 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp
-@@ -37,6 +37,13 @@ void main() {
+@@ -29,14 +29,23 @@ void main() {
+ 
+             const uint i01 = data_b[i10*p.nb10 + i11*p.nb11 + i12*p.nb12];
+ 
+-            const uint a_offset = i01*p.nb01 + i11*p.nb02 + i12*p.nb03;
+             const uint d_offset = i10*p.nb21 + i11*p.nb22 + i12*p.nb23;
+ 
+-            const uint ib = a_offset + i00/QUANT_K; // block index
+             const uint iqs = (i00%QUANT_K)/QUANT_R; // quant index
              const uint iybs = i00 - i00%QUANT_K; // dst block start index
              const uint y_offset = QUANT_R == 1 ? 1 : QUANT_K/2;
  
-+            if (i01 == 0xFFFFFFFFu) {
++            if (i01 >= p.ne01) {
 +                data_d[d_offset + iybs + iqs           ] = D_TYPE(0.0f);
 +                data_d[d_offset + iybs + iqs + y_offset] = D_TYPE(0.0f);
 +                gid_y += gl_WorkGroupSize.y * gl_NumWorkGroups.y;
 +                continue;
 +            }
++
++            const uint a_offset = i01*p.nb01 + i11*p.nb02 + i12*p.nb03;
++
++            const uint ib = a_offset + i00/QUANT_K; // block index
 +
              vec2 v = dequantize(ib, iqs, 0);
              const vec2 dm = get_dm(ib, 0);
@@ -237,10 +264,21 @@ index 5a9d0e778..4cb6403c9 100644
          p.batch_stride_b % 4 == 0 && b_offset % 4 == 0 &&
          p.ncols % 4 == 0 && BLOCK_SIZE % 4 == 0 &&
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
-index 4aeda68c7..88a65a40a 100644
+index 4aeda68c7..9bdebd8ab 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
-@@ -31,6 +31,7 @@ layout (push_constant) uniform parameter
+@@ -7,10 +7,6 @@
+ #extension GL_KHR_shader_subgroup_arithmetic : require
+ #endif
+ 
+-#ifdef MUL_MAT_ID
+-#define EXPERT_COUNT 8
+-#endif
+-
+ #include "mul_mat_vec_iface.glsl"
+ 
+ layout (push_constant) uniform parameter
+@@ -31,6 +27,7 @@ layout (push_constant) uniform parameter
      uint ne11;
      uint expert_i1;
      uint nbi1;
@@ -248,7 +286,7 @@ index 4aeda68c7..88a65a40a 100644
  #else
      uint base_work_group_y;
      uint ne02;
-@@ -44,7 +45,7 @@ layout (push_constant) uniform parameter
+@@ -44,7 +41,7 @@ layout (push_constant) uniform parameter
  uint expert_id;
  #endif
  
@@ -257,7 +295,7 @@ index 4aeda68c7..88a65a40a 100644
  #ifdef MUL_MAT_ID
      const uint expert_i0 = gl_WorkGroupID.y;
  #else
-@@ -84,6 +85,13 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
+@@ -84,6 +81,13 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
  #else
              batch_idx * p.batch_stride_d;
  #endif
@@ -558,7 +596,7 @@ index 7bbee577f..6a2d8b8b1 100644
      b_offset /= QUANT_K_Q8_1;
  
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/topk_moe.comp b/ggml/src/ggml-vulkan/vulkan-shaders/topk_moe.comp
-index ef2f202ec..182c26c0e 100644
+index ef2f202ec..867b24929 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/topk_moe.comp
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/topk_moe.comp
 @@ -23,6 +23,8 @@ layout (push_constant) uniform parameter
@@ -570,25 +608,26 @@ index ef2f202ec..182c26c0e 100644
  };
  
  layout(local_size_x_id = 0, local_size_y = 4, local_size_z = 1) in;
-@@ -142,6 +144,8 @@ void main() {
+@@ -142,6 +144,13 @@ void main() {
  
      float wt_sum = 0.f;
  
-+    float first_max_val = 0.0f;
++    float first_max_val = probs[0];
++    [[unroll]]
++    for (int i = 1; i < experts_per_thread; i++) {
++        first_max_val = max(first_max_val, probs[i]);
++    }
++    first_max_val = subgroupMax(first_max_val);
 +
      float output_weights[experts_per_thread];
  
      [[unroll]]
-@@ -176,15 +180,33 @@ void main() {
+@@ -176,15 +185,29 @@ void main() {
              }
          }
  
-+        if (k == 0) {
-+            first_max_val = max_val;
-+        }
-+
 +        bool ser_pruned = false;
-+        if (ser_thresh > 0.0f && k >= int(ser_min_experts)
++        if (n_rows <= 8 && ser_thresh > 0.0f && k >= int(ser_min_experts)
 +            && gating_func != GATING_FUNC_SOFTMAX_WEIGHT) {
 +            if (max_val < ser_thresh * first_max_val) {
 +                ser_pruned = true;

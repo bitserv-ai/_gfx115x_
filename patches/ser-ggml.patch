@@ -18,22 +18,23 @@ index d6807b6dd..acdbf1d66 100644
      // note: the resulting top k indices are in no particular order
      GGML_API struct ggml_tensor * ggml_top_k(
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 8a0e5c255..1277ec99f 100644
+index 8a0e5c255..66726b34d 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
-@@ -1622,7 +1622,9 @@ static void ggml_compute_forward_mul_mat_id(
+@@ -1622,7 +1622,10 @@ static void ggml_compute_forward_mul_mat_id(
              for (int id = 0; id < n_ids; ++id) {
                  const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
  
 -                assert(i02 >= 0 && i02 < n_as);
 +                if (i02 < 0 || i02 >= n_as) {
++                    memset((char *) dst->data + (id*nb1 + iid1*nb2), 0, ne0*sizeof(float));
 +                    continue;
 +                }
  
                  MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
                  matrix_row_counts[i02] += 1;
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 0f682fd18..174a59ea0 100644
+index 0f682fd18..6c99d0ce3 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -5320,6 +5320,33 @@ struct ggml_tensor * ggml_argsort_top_k(
@@ -50,7 +51,7 @@ index 0f682fd18..174a59ea0 100644
 +        float                 thresh) {
 +    GGML_ASSERT(a->ne[0] >= k);
 +
-+    if (min_entries <= 0 || thresh <= 0.0f) {
++    if (min_entries < 1 || thresh <= 0.0f) {
 +        return ggml_argsort_top_k(ctx, a, k);
 +    }
 +

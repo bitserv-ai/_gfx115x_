@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/include/llama.h b/include/llama.h
-index b89ab758b..9fd1b58f5 100644
+index c58622d1b..aedf68608 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -368,6 +368,9 @@ extern "C" {
@@ -14,10 +14,10 @@ index b89ab758b..9fd1b58f5 100644
          // if it returns true, execution of llama_decode() will be aborted
          // currently works only with CPU execution
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 0465430df..b12b51563 100644
+index 8925ab761..a1d186624 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -211,6 +211,9 @@ llama_context::llama_context(
+@@ -214,6 +214,9 @@ llama_context::llama_context(
      cparams.op_offload = params.op_offload;
      cparams.kv_unified = params.kv_unified;
  
@@ -27,24 +27,30 @@ index 0465430df..b12b51563 100644
      // initialized later
      cparams.pipeline_parallel = false;
  
-@@ -294,6 +297,26 @@ llama_context::llama_context(
+@@ -297,6 +300,32 @@ llama_context::llama_context(
          }
          backends.emplace_back(backend_cpu);
  
 +        // SER (Smart Expert Reduction) only has effect on the Vulkan fused topk_moe path.
 +        // On CPU/HIP backends, --ser is accepted but has no effect.
 +        if (cparams.min_experts > 0) {
++            if (cparams.min_experts >= (int32_t) hparams.n_expert_used) {
++                LLAMA_LOG_WARN("%s: min_experts (%d) >= n_expert_used (%u) -- SER pruning will never trigger\n",
++                        __func__, cparams.min_experts, hparams.n_expert_used);
++            }
 +            bool has_vulkan = false;
 +            for (auto & backend : backends) {
 +                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-+                const char * name = dev ? ggml_backend_dev_name(dev) : nullptr;
-+                if (name && strstr(name, "vulkan")) {
++                ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
++                if (reg && strcmp(ggml_backend_reg_name(reg), "Vulkan") == 0) {
 +                    has_vulkan = true;
 +                    break;
 +                }
 +            }
 +            if (has_vulkan) {
 +                cparams.ser_active = true;
++                LLAMA_LOG_INFO("%s: SER active (min_experts=%d, thresh=%.2f)\n",
++                        __func__, cparams.min_experts, cparams.thresh_experts);
 +            } else {
 +                LLAMA_LOG_WARN("%s: --ser is active (min_experts=%d, thresh=%.2f) but no Vulkan backend found; SER is Vulkan-only and has no effect\n",
 +                        __func__, cparams.min_experts, cparams.thresh_experts);
@@ -54,7 +60,7 @@ index 0465430df..b12b51563 100644
          // create a list of the set_n_threads functions in the backends
          for (auto & backend : backends) {
              ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-@@ -3475,6 +3498,8 @@ llama_context_params llama_context_default_params() {
+@@ -3552,6 +3581,8 @@ llama_context_params llama_context_default_params() {
          /*.cb_eval_user_data           =*/ nullptr,
          /*.type_k                      =*/ GGML_TYPE_F16,
          /*.type_v                      =*/ GGML_TYPE_F16,
@@ -79,16 +85,34 @@ index 546ae1e2c..7c1920853 100644
  
      enum llama_context_type ctx_type;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index dc41d6690..ea3b0058b 100644
+index cc966fc38..145399fb0 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1903,7 +1903,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1903,7 +1903,33 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      // select experts
      ggml_tensor * selected_experts = selected_experts_in;
      if (selected_experts == nullptr) {
 -        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
-+        const ggml_tensor * ser_exps = gate_up_exps ? gate_up_exps : up_exps;
-+        const bool ser_bf16 = ser_exps && ser_exps->type == GGML_TYPE_BF16;
++        bool ser_bf16 = false;
++        for (ggml_tensor * ser_exps : { gate_up_exps, up_exps, gate_exps, down_exps }) {
++            if (!ser_exps) {
++                continue;
++            }
++            if (ser_exps->type == GGML_TYPE_BF16) {
++                ser_bf16 = true;
++                break;
++            }
++            for (const auto & lora : *loras) {
++                llama_adapter_lora_weight * lw = lora.first->get_weight(ser_exps);
++                if (lw && (lw->a->type == GGML_TYPE_BF16 || lw->b->type == GGML_TYPE_BF16)) {
++                    ser_bf16 = true;
++                    break;
++                }
++            }
++            if (ser_bf16) {
++                break;
++            }
++        }
 +        if (cparams.ser_active && !ser_bf16) {
 +            selected_experts = ggml_argsort_top_k_thresh(
 +                    ctx0, selection_probs, n_expert_used,
@@ -99,3 +123,12 @@ index dc41d6690..ea3b0058b 100644
          cb(selected_experts->src[0], "ffn_moe_argsort", il);
      }
      cb(selected_experts, "ffn_moe_topk", il);
+@@ -1911,7 +1937,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
+         // TODO: Use scalar div instead when/if implemented
+         ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
+-        selected_experts = ggml_cast(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts)), GGML_TYPE_I32);
++        selected_experts = ggml_cast(ctx0, ggml_floor(ctx0, ggml_scale(ctx0, f_sel, 1.0f / float(hparams.n_group_experts))), GGML_TYPE_I32);
+         probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+     } else {
+         probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);

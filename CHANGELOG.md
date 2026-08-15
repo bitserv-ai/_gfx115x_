@@ -9,8 +9,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Review-4 hardening batch** (#191): bounds-checked recurrent state
+  read/restore (T-A.4/5/6), context-shift guards for non-shiftable
+  memory in completion/passkey tools (T-A.11), ctx_shift auto-disable
+  for hybrid/recurrent models (T-A.14), cache-reuse startup warning
+  (T-A.16), CPU mul_mat_id skip-and-zero on sentinel expert IDs
+  (T-B.4/5), `--ser` argument validation (T-B.6/7), Vulkan shader
+  sentinel/row-bound hardening (T-B.9/10/15/17/18/19). 4 new patch
+  files: `shift-guard-completion`, `shift-guard-passkey`,
+  `ser-cpu-repack`, `ser-cpu-spacemit-ime`.
+
+### Changed
+
+- **SER activation + gate resync** (#189): SER now activates via
+  backend-registry detection (`Vulkan` registry name) instead of the
+  never-matching `strstr(name, "vulkan")`; positive `SER active` log;
+  `ser_bf16` and `output_bias == 0.0f` gates restored in the tree and
+  patches resynced; one-time warning when SER params are present but
+  topk_moe fusion does not fire; GROVEMOE sentinel preservation
+  (ggml_floor). Live speedup re-measurement pending (prior claim not
+  attributable to SER).
+- **VL correctness cluster** (#192): `has_mtmd` now reflects the actual
+  request (`!files.empty()`) instead of hardcoded true — text-only
+  requests on VL models regain LCP prefix reuse and checkpoint restore;
+  prompt-cache entries no longer cross the media boundary; LCP clamped
+  before the first media chunk. New patch file `vl-server-common`.
+
 ### Fixed
 
+- **Checkpoint load/save abort → bool + fallback** (#188): checkpoint
+  load/save failures no longer abort the whole server (SIGABRT). Load
+  failures fall back to full re-evaluation; save failures drop the
+  checkpoint entry (no silent empty checkpoints). All 14 server call
+  sites consume the return value (Contract C1).
+- **D5 n_past guard + spec_ckpt guard + MTP arch gate** (#190):
+  recurrent-state loss (`seq_pos_max < 0`) now forces `n_past = 0`
+  before batching (P0); `spec_ckpt` no longer records `pos_max = -1`;
+  MTP draft creation hard-fails outside the verified allowlist
+  {qwen35, qwen35moe} (Contract C5).
 - **cache-reuse hybrid guard** (#187): Gate KV-shift chunk reuse on
   `!needs_reeval`. On hybrid GDN models (Qwen 3.6) the recurrent state
   cannot be relocated by `seq_rm`+`seq_add` — reuse would leave it zeroed

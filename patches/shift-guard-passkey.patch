@@ -1,0 +1,17 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/examples/passkey/passkey.cpp b/examples/passkey/passkey.cpp
+index 8440a2bf7..5e07e4174 100644
+--- a/examples/passkey/passkey.cpp
++++ b/examples/passkey/passkey.cpp
+@@ -131,6 +131,11 @@ int main(int argc, char ** argv) {
+ 
+     auto * mem = llama_get_memory(ctx);
+ 
++    if (!llama_memory_can_shift(mem)) {
++        LOG_ERR("%s: this example requires memory that supports shifting, but the current memory does not\n", __func__);
++        return 1;
++    }
++
+     // fill the KV cache
+     for (int i = 0; i < n_ctx; i += n_batch) {
+         if (i > 0 && n_grp > 1) {

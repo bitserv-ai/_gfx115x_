@@ -1,0 +1,14 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/tools/completion/completion.cpp b/tools/completion/completion.cpp
+index 6747558fc..a3a28983b 100644
+--- a/tools/completion/completion.cpp
++++ b/tools/completion/completion.cpp
+@@ -607,7 +607,7 @@ int llama_completion(int argc, char ** argv) {
+                 // - take half of the last (n_ctx - n_keep) tokens and recompute the logits in batches
+ 
+                 if (n_past + (int) embd.size() >= n_ctx) {
+-                    if (!params.ctx_shift){
++                    if (!params.ctx_shift || !llama_memory_can_shift(mem)){
+                         LOG_WRN("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
+                         break;
+                     }

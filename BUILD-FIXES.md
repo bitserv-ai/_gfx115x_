@@ -4369,6 +4369,26 @@ speedup on Qwen3.6-35B-A3B IQ4_NL.
 **Build required**: `./build-vllm.sh --step 33 --force-rebuild llamacpp`
 **Related**: ik_llama.cpp PR #239 (original CPU implementation).
 
+**Review-4 corrections (2026-08-14, T-B.13/T-B.14)**:
+- The live-test speedup claim above is **invalidated**: SER never
+  activated because the backend detection used
+  `strstr(name, "vulkan")` against `GGML_VK_NAME = "Vulkan"` (#189/T-B.1).
+  The measured output was coherent but not attributable to SER.
+  Re-measure after the next rebuild.
+- Gate status: the working tree had drifted from the Aug-10 patch state
+  (`ser_bf16` gate and `output_bias == 0.0f` fusion condition missing in
+  the tree). Resynced and patches re-cut in #189 (T-B.2/T-B.3/T-B.14).
+- `ser_active` detection is now backend-registry based
+  (`ggml_backend_reg_name == "Vulkan"`), not `ggml_backend_dev_name()`
+  string match (#189/T-B.1).
+- The CPU special paths limitation (`repack.cpp`, `spacemit/ime.cpp`
+  asserting on sentinel IDs) is fixed: skip-and-zero per Contract C3
+  (#191/T-B.5).
+- Process lesson (T-B.14): the Aug-10 patch re-cut happened without
+  re-apply + rebuild, so the built binary never contained the gates.
+  Patch re-cuts require re-apply + rebuild; reviews must diff the
+  working tree against the patch files, not read the patches alone.
+
 ### 176. WSL2 ROCm Platform Detection: amdsmi Fallback (vllm/43)
 
 **Symptom**: On WSL2 with `/dev/dxg`, vLLM fails at LLM init with
@@ -5042,3 +5062,230 @@ against the per-request API parameter (`server-schema.cpp:67-69`).
 **Upstream status**: Not submitted. Upstream has not changed cache-reuse
 between our pin and master; no hybrid gate in sight. Details:
 `workdoc/codebase-audit-2026-08.md` §5.1.
+
+**Review-4 correction (2026-08-14, T-B.13)**: The root-cause statement
+"the feature silently activates on Qwen 3.6" is imprecise for IMROPE
+models: `llama_kv_cache::get_can_shift()` already returns false for
+`n_pos_per_embd > 1` (`llama-kv-cache.cpp:1192`), which covers
+Qwen3.5/3.6 (IMROPE, 4 positions per embedding). The `!needs_reeval`
+gate protects non-M-RoPE hybrids (LFM2 class, attention part reports
+shiftable) and any future M-RoPE shift support.
+
+### 188. Checkpoint load/save abort → bool + fallback (Review-4 T-A.1/T-A.8)
+
+**Files:** `common/common.cpp`, `common/common.h`,
+`tools/server/server-context.cpp` — patches `ser-common.patch`,
+`hybrid-attn-server.patch`
+
+**Symptom**: Any checkpoint restore failure aborts the entire server
+(SIGABRT). Review-3 fix C1 was never applied: `load_tgt`/`load_dft`
+call `GGML_ABORT` on size mismatch, and llama-server registers no abort
+callback. One poisoned checkpoint in any slot = total DoS for all slots.
+
+**Root cause**: `llama_state_seq_set_data_ext` catches memory-layer
+throws and returns 0 (`llama-context.cpp`); the load functions treat
+`n != size` as fatal. Creation side (T-A.8): on save failure
+`get_size` swallows the exception → 0 → an *empty* checkpoint with
+valid `pos_max` is recorded; restore no-ops but `n_past = pos_max + 1`
+continues with zeroed recurrent state.
+
+**Fix** (Contract C1):
+- `load_tgt`/`load_dft`/`update_tgt`/`update_dft` return `bool`, never
+  abort. Load: empty buffer → true (no-op); null ctx or mismatch →
+  warn + false. Update: null ctx, size 0, or mismatch → warn + clear +
+  false (size 0 is now a creation failure, not a valid empty checkpoint).
+- All 14 server call sites consume the return value: load failure →
+  full re-evaluation (`n_past = 0`) mirroring `server_prompt_cache::load`;
+  update failure → checkpoint entry dropped (`pop_back` / draft discard).
+- Spec-rollback restore site is fail-closed (`send_error` + `release` +
+  `prompt_clear`, the established decode-error pattern): mid-generation
+  re-prefill has no mechanism and `common_context_seq_rm` aborts on
+  FULL-type memory.
+
+**Verified**: All 4 aborts removed; call-site enumeration tree-wide
+(server sites all consumed; examples/tests discard the bool — noted).
+Invariant `spec_draft non-empty ⇒ spec_ckpt valid` holds across all
+discard paths.
+
+### 189. SER activation + gate resync (Review-4 T-B.1/2/3/8/12-M/14)
+
+**Files:** `src/llama-context.cpp`, `src/llama-graph.cpp`,
+`ggml/src/ggml-vulkan/ggml-vulkan.cpp` — patches `ser-llama.patch`,
+`ser-vulkan.patch`
+
+**Symptom**: SER (Smart Expert Reduction, #175) never activated: the
+detection used `strstr(name, "vulkan")` but the Vulkan backend reports
+`GGML_VK_NAME = "Vulkan"`. Additionally the tree had drifted from the
+Aug-10 patch state (gates missing), and the shipped speedup claim was
+not attributable to SER.
+
+**Fix**:
+- T-B.1: backend-registry detection
+  (`ggml_backend_dev_backend_reg` + `strcmp(ggml_backend_reg_name(reg),
+  "Vulkan")`), immune to device-name suffixes; positive `SER active`
+  log at activation, warn retained for non-Vulkan configs.
+- T-B.2: `ser_bf16` gate restored and extended over
+  `{gate_up_exps, up_exps, gate_exps, down_exps}` plus LoRA a/b ID
+  tensors (exactly the tensors that become `mul_mat_id` src0).
+- T-B.3: `&& pc.output_bias == 0.0f` restored in the fusion gate.
+- T-B.8: one-time warning when SER params are present but the topk_moe
+  fusion does not fire (standalone argsort path).
+- T-B.12-M (Contract C4): `ggml_floor` wraps the scale in the GROVEMOE
+  group-ID normalization so the SER sentinel (−1) survives
+  cast→scale→cast (−1×(1/n) ∈ (−1,0) → floor = −1); for valid ids ≥ 0
+  floor ≡ trunc → bit-identical. Defense-in-depth (finding DISMISSED;
+  fusion stays broken for GROVEMOE by the pre-existing chain).
+- T-B.14: tree and patches resynced; patches re-cut after the tree fix.
+
+**Verified**: Registry detection confirmed against ggml-backend API;
+gate coverage exact vs `build_lora_mm_id` call sites; floor math and
+Vulkan pipeline support verified; full patch set byte-identical to the
+working tree.
+
+### 190. D5 n_past guard + spec_ckpt guard + MTP arch gate (Review-4 T-A.2/9/21)
+
+**Files:** `tools/server/server-context.cpp` — patch
+`hybrid-attn-server.patch`
+
+**Symptom**: T-A.2 (P0): after recurrent-state loss (`cell_zero`,
+`seq_pos_max < 0`) the slot continues with stale `n_past > 0` →
+generation on zeroed/corrupted recurrent state. T-A.9: a draft starting
+right after a `cell_zero` event records `pos_max = -1`; a later
+oversized rollback wipes the entire prefix. T-A.21: MTP draft creation
+was unguarded for unverified architectures.
+
+**Fix**:
+- T-A.2: two guards at SLOT_STATE_STARTED, both before batching —
+  (1) hybrid/recurrent restore finds no surviving checkpoint (empty
+  list or none with `pos_max <= pos_next`) → `n_past = 0`;
+  (2) catch-all: `needs_reeval && n_past > 0 &&
+  llama_memory_seq_pos_max(...) < 0` → `n_past = 0`.
+- T-A.9: `pos_max < 0` guard before `spec_ckpt.update_tgt` (discard
+  shape identical to the update-failure branches).
+- T-A.21 (Contract C5): hard-fail gate at MTP draft creation —
+  allowlist {qwen35, qwen35moe} via
+  `llama_model_meta_val_str(model_tgt, "general.architecture", ...)`
+  (`llama_model_arch_name` does not exist in the public API); strictly
+  `--spec-type draft-mtp`; `SRV_ERR` + startup abort otherwise;
+  fail-closed on meta-read failure.
+
+**Verified**: No bypass found for the specified loss paths; guards fire
+before `keep_first`/`seq_rm`/batch fill; gate covers both MTP creation
+branches; #188 wiring intact. Residual (out of scope, noted): `n_swa > 0`
+hybrids can still `cell_zero` via in-request truncation rollback —
+not reachable on production qwen35/qwen35moe.
+
+**Audit follow-ups (V1-V3 audit 2026-08-14, all fixed in this entry)**:
+- Finding A (P1): Guard-2 checkpoint search off-by-one —
+  `cur.pos_max <= pos_next` allowed a checkpoint covering the diverging
+  token (silent corruption, persisted via re-checkpointing). Fixed:
+  strict `cur.pos_max < pos_next` (falls back to earlier checkpoint or
+  full re-eval).
+- Finding B (P1/P2): TAG_PROMPT_LOGITS decrement after the guards
+  created a rollback-1 truncation; for `n_rs_seq == 0` hybrids →
+  cell_zero. Fixed: guard `needs_reeval && n_past > 0 &&
+  1 > llama_n_rs_seq(ctx_tgt)` → `n_past = 0` (full wipe via rm_all);
+  production MTP (`n_rs_seq >= 1`) unaffected.
+- Guard-1 std-path off-by-one (pre-existing, found during Finding-B
+  verification, fixed): std checkpoint restore set `n_past = pos_max`
+  while PARTIAL_ONLY restore puts the recurrent cell at
+  `cell.pos = pos_max` → truncation demanded rollback-1 → cell_zero →
+  silent corruption for `needs_reeval && n_swa > 0 && n_rs_seq == 0`
+  (in-tree reachable only on LFM2 GGUFs carrying
+  `lfm2.attention.sliding_window`, e.g. Lfm25AudioTokenizer output;
+  normal LFM2/LFM2MOE causal GGUFs unaffected — no key, n_swa == 0).
+  Fixed: `pos_next = min(pos_next, pos_max + 1)` for `needs_reeval`
+  (mirrors the n_swa == 0 block); pure-KV formula byte-identical.
+  Residual corner (pre-existing, unchanged): divergence exactly at a
+  `pos_min == 0` checkpoint boundary with new tokens.
+
+### 191. Review-4 hardening batch (T-A.4/5/6/11/14/16, T-B.4/5/6/7/9/10/15/17/18/19)
+
+**Files:** `src/llama-memory-recurrent.cpp`, `tools/server/server-context.cpp`,
+`tools/completion/completion.cpp`, `examples/passkey/passkey.cpp`,
+`src/llama-context.cpp`, `common/arg.cpp`, `ggml/src/ggml.c`,
+`ggml/src/ggml-cpu/ggml-cpu.c`, `ggml/src/ggml-cpu/repack.cpp`,
+`ggml/src/ggml-cpu/spacemit/ime.cpp`, 4 Vulkan shaders —
+patches `hybrid-attn-memory-recurrent.patch`, `hybrid-attn-server.patch`,
+`ser-common.patch`, `ser-llama.patch`, `ser-ggml.patch`,
+`ser-vulkan.patch`, plus 4 new: `shift-guard-completion.patch`,
+`shift-guard-passkey.patch`, `ser-cpu-repack.patch`,
+`ser-cpu-spacemit-ime.patch`
+
+**Scope-A items**:
+- T-A.4: bounds-checked `get_cell_tail` in `state_read`; owner IDs in
+  `state_read_meta` validated vs `size` and `n_seq_max` (graceful failure).
+- T-A.5: full-restore (`seq_id == -1`) repopulates snapshot planes for
+  every restored active cell; dead `&& res` dropped.
+- T-A.6: `cell_zero` resets sibling `rs_idx` for all owners before
+  clearing the owner set (defense-in-depth one-liner).
+- T-A.11: non-server tools guard `llama_memory_can_shift` before
+  shifting (completion: graceful stop; passkey: startup guard + clean
+  exit); find_slot message reports the checked bound; `get_can_shift`
+  comment corrected.
+- T-A.14: `ctx_shift` auto-disabled at startup for hybrid/recurrent
+  (`needs_reeval`) memory with warning — the shift path does not touch
+  `slot.prompt.checkpoints` (desync risk); warn-only rejected as unsafe.
+- T-A.16: startup warning when `n_cache_reuse` is configured but
+  unsupported (`needs_reeval`); IMROPE case already covered by the
+  pre-existing `get_can_shift` gate.
+
+**Scope-B items**:
+- T-B.4/T-B.5 (Contract C3): skip-and-zero on sentinel expert IDs in
+  all three CPU `mul_mat_id` implementations (`ggml-cpu.c`,
+  `repack.cpp`, `spacemit/ime.cpp`) — replaces asserts; zeroed region
+  exactly matches the compute-path addressing; race-free (ith==0 before
+  barrier).
+- T-B.6: degenerate-config warning (`min_experts >= n_expert_used`) at
+  context init (arg.cpp has no model access at parse time).
+- T-B.7: `--ser` argument validation — full-string parse + reject
+  `!isfinite || < 0 || > 1` for thresh, `kmin < 1`.
+- T-B.9/T-B.18: shader sentinel handling hardened — check + zero-write
+  before offset computation; `i01 >= p.ne01` row-count bound replaces
+  sentinel equality (catches sentinel + any OOB id).
+- T-B.10: dead `EXPERT_COUNT` define removed.
+- T-B.15: `n_rows <= 8` folded into the shader SER guard (host gate
+  kept verbatim — defense-in-depth layering).
+- T-B.17: `min_entries >= 1` bound explicit in the SER-enable gate
+  (NaN mechanism refuted — CLAMP node prevents div-by-zero; no shader
+  wt_sum guard added).
+- T-B.19: `first_max_val` = max unbiased probability over the row
+  (subgroupMax after gating, before the k-loop) — restores documented
+  `thresh × max_prob` semantics for bias models; identical for unbiased
+  models. Untestable locally (no SIGMOID_NORM_BIAS model in the hub).
+
+**Verified**: Both sub-batches PASS; all `cells[seq_id]` indexing
+guarded; skip-and-zero constructs match compute-path addressing in all
+three implementations; shader guards consistent. Follow-ups noted:
+`llama-memory-hybrid.cpp` comment, completion self-extend path,
+zendnn/sycl/hexagon mul_mat_id asserts (not built in this fork).
+
+### 192. VL correctness cluster (Review-4 T-A.7/12/19)
+
+**Files:** `tools/server/server-common.cpp`,
+`tools/server/server-task.cpp` — patches `vl-server-common.patch` (new),
+`hybrid-attn-server-task.patch`
+
+**Symptom**: T-A.7 (production-active): Lemonade loads `--mmproj` for
+all Qwen3.6 recipes, and `process_mtmd_prompt` hardcoded
+`has_mtmd = true` — every text-only request was treated as multimodal:
+#186 guard zeroed `n_past`, checkpoints cleared, recurrent restore
+blocked, hybrid prefix reuse disabled.
+
+**Fix** (Contract C2 — `has_mtmd` now means "the request actually
+contains media"):
+- T-A.7: `server_tokens(chunks, !files.empty())` in
+  `process_mtmd_prompt`.
+- T-A.12: prompt-cache candidate filter — entries whose `has_mtmd`
+  does not match the request cannot win (state never restored across
+  the media boundary); mismatched entries stay cached.
+- T-A.19: `get_common_prefix` clamps the LCP before the first media
+  chunk for mtmd token sets (applies uniformly to all 6 call sites).
+
+**Verified**: All 5 contract consumers behave correctly under the new
+semantics (#186 guard, can_cache_reuse, recurrent restore gates, T-A.12
+gate, T-A.19 clamp); no restore-path bypass; non-VL behavior identical
+(all flags false → gates no-op). Conservative trade-off (intended):
+RAM prompt-cache restore stays blocked for text-only tasks on VL models
+(`slot.prompt.tokens.has_mtmd` model-level init is T-A.15, DEFERRED);
+text-only reuse works via slot-level LCP + checkpoint restore.

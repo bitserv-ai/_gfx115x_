@@ -1,9 +1,17 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/common/arg.cpp b/common/arg.cpp
-index fdf58614b..5b4f06c19 100644
+index fdf58614b..e18246ac8 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -1445,6 +1445,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -26,6 +26,7 @@
+ #include <algorithm>
+ #include <cinttypes>
+ #include <climits>
++#include <cmath>
+ #include <cstdarg>
+ #include <fstream>
+ #include <list>
+@@ -1445,6 +1446,35 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.swa_full = true;
          }
      ).set_env("LLAMA_ARG_SWA_FULL"));
@@ -16,13 +24,21 @@ index fdf58614b..5b4f06c19 100644
 +            if (pos == std::string::npos) {
 +                throw std::invalid_argument("expected Kmin,thresh format for --ser");
 +            }
-+            int kmin = std::stoi(value.substr(0, pos));
-+            float thresh = std::stof(value.substr(pos + 1));
++            size_t pos_end = 0;
++            int kmin = std::stoi(value.substr(0, pos), &pos_end);
++            if (pos_end != pos) {
++                throw std::invalid_argument("invalid Kmin value");
++            }
++            const std::string thresh_str = value.substr(pos + 1);
++            float thresh = std::stof(thresh_str, &pos_end);
++            if (pos_end != thresh_str.size()) {
++                throw std::invalid_argument("invalid threshold value");
++            }
 +            if (kmin < 1) {
 +                throw std::invalid_argument("Kmin must be >= 1");
 +            }
-+            if (thresh < 0.0f) {
-+                throw std::invalid_argument("threshold must be >= 0.0");
++            if (!std::isfinite(thresh) || thresh < 0.0f || thresh > 1.0f) {
++                throw std::invalid_argument("threshold must be a finite value in [0.0, 1.0]");
 +            }
 +            params.min_experts    = kmin;
 +            params.thresh_experts = thresh;
@@ -32,7 +48,7 @@ index fdf58614b..5b4f06c19 100644
          {"-ctxcp", "--ctx-checkpoints", "--swa-checkpoints"}, "N",
          string_format("max number of context checkpoints to create per slot (default: %d)"
 diff --git a/common/common.cpp b/common/common.cpp
-index 0dd9ede5e..99b0fe85b 100644
+index 0dd9ede5e..4d74a2717 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -1601,6 +1601,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
@@ -45,8 +61,129 @@ index 0dd9ede5e..99b0fe85b 100644
      return cparams;
  }
  
+@@ -2073,76 +2076,102 @@ void common_prompt_checkpoint::update_pos(
+     this->pos_max  = pos_max;
+ }
+ 
+-void common_prompt_checkpoint::update_tgt(
++bool common_prompt_checkpoint::update_tgt(
+         llama_context * ctx,
+         llama_seq_id seq_id,
+         llama_state_seq_flags flags) {
+     if (ctx == nullptr) {
+-        return;
++        return false;
+     }
+ 
+     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
++    if (ckpt_size == 0) {
++        COM_WRN("failed to get checkpoint size for seq_id %d\n", seq_id);
++        data_tgt.clear();
++        return false;
++    }
+ 
+     data_tgt.resize(ckpt_size);
+ 
+     const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
+     if (n != ckpt_size) {
+-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
++        COM_WRN("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
++        data_tgt.clear();
++        return false;
+     }
++
++    return true;
+ }
+ 
+-void common_prompt_checkpoint::update_dft(
++bool common_prompt_checkpoint::update_dft(
+         llama_context * ctx,
+         llama_seq_id seq_id,
+         llama_state_seq_flags flags) {
+     if (ctx == nullptr) {
+-        return;
++        return false;
+     }
+ 
+     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
++    if (ckpt_size == 0) {
++        COM_WRN("failed to get checkpoint size for seq_id %d\n", seq_id);
++        data_dft.clear();
++        return false;
++    }
+ 
+     data_dft.resize(ckpt_size);
+ 
+     const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
+     if (n != ckpt_size) {
+-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
++        COM_WRN("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
++        data_dft.clear();
++        return false;
+     }
++
++    return true;
+ }
+ 
+-void common_prompt_checkpoint::load_tgt(
++bool common_prompt_checkpoint::load_tgt(
+         llama_context * ctx,
+         llama_seq_id seq_id,
+         llama_state_seq_flags flags) const {
+-    if (ctx == nullptr) {
+-        return;
++    if (data_tgt.empty()) {
++        return true;
+     }
+ 
+-    if (data_tgt.empty()) {
+-        return;
++    if (ctx == nullptr) {
++        COM_WRN("failed to load checkpoint for seq_id %d: context is null\n", seq_id);
++        return false;
+     }
+ 
+     const size_t n = llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags);
+     if (n != data_tgt.size()) {
+-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
++        COM_WRN("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
++        return false;
+     }
++
++    return true;
+ }
+ 
+-void common_prompt_checkpoint::load_dft(
++bool common_prompt_checkpoint::load_dft(
+         llama_context * ctx,
+         llama_seq_id seq_id,
+         llama_state_seq_flags flags) const {
+-    if (ctx == nullptr) {
+-        return;
++    if (data_dft.empty()) {
++        return true;
+     }
+ 
+-    if (data_dft.empty()) {
+-        return;
++    if (ctx == nullptr) {
++        COM_WRN("failed to load checkpoint for seq_id %d: context is null\n", seq_id);
++        return false;
+     }
+ 
+     const size_t n = llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags);
+     if (n != data_dft.size()) {
+-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
++        COM_WRN("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
++        return false;
+     }
++
++    return true;
+ }
+ 
+ void common_prompt_checkpoint::clear_tgt() {
 diff --git a/common/common.h b/common/common.h
-index 2adb310b8..9e54e73f1 100644
+index 2adb310b8..de666d0c2 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -455,6 +455,8 @@ struct common_params {
@@ -58,3 +195,30 @@ index 2adb310b8..9e54e73f1 100644
      int32_t grp_attn_n            =     1; // group-attention factor
      int32_t grp_attn_w            =   512; // group-attention width
      int32_t n_print               =    -1; // print token count every n tokens (-1 = disabled)
+@@ -1097,22 +1099,22 @@ struct common_prompt_checkpoint {
+             llama_pos pos_min,
+             llama_pos pos_max);
+ 
+-    void update_tgt(
++    bool update_tgt(
+             llama_context * ctx,
+             llama_seq_id seq_id,
+             llama_state_seq_flags flags);
+ 
+-    void update_dft(
++    bool update_dft(
+             llama_context * ctx,
+             llama_seq_id seq_id,
+             llama_state_seq_flags flags);
+ 
+-    void load_tgt(
++    bool load_tgt(
+             llama_context * ctx,
+             llama_seq_id seq_id,
+             llama_state_seq_flags flags) const;
+ 
+-    void load_dft(
++    bool load_dft(
+             llama_context * ctx,
+             llama_seq_id seq_id,
+             llama_state_seq_flags flags) const;

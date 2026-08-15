@@ -1,0 +1,47 @@
+<!-- Copyright 2026 bitserv-ai -->
+diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
+index ac291d359..f27e3d8ee 100644
+--- a/tools/server/server-common.cpp
++++ b/tools/server/server-common.cpp
+@@ -483,6 +483,11 @@ size_t server_tokens::get_common_prefix(const server_tokens & b) const {
+         return max_idx;
+     }
+ 
++    size_t first_media_idx = max_idx;
++    if (!map_idx_to_media.empty()) {
++        first_media_idx = std::min(first_media_idx, map_idx_to_media.begin()->first);
++    }
++
+     for (size_t i = 0; i < max_idx; ++i) {
+         const llama_token ai =   tokens[i];
+         const llama_token bi = b.tokens[i];
+@@ -505,17 +510,17 @@ size_t server_tokens::get_common_prefix(const server_tokens & b) const {
+                 continue;
+             }
+ 
+-            return i;
++            return std::min(i, first_media_idx);
+         }
+ 
+         if (ai == bi) {
+             continue;
+         }
+ 
+-        return i;
++        return std::min(i, first_media_idx);
+     }
+ 
+-    return max_idx; // all tokens are equal
++    return first_media_idx;
+ }
+ 
+ common_chat_msg_spans server_tokens::find_message_spans(const common_chat_msg_delimiters & delims) const {
+@@ -719,7 +724,7 @@ server_tokens process_mtmd_prompt(mtmd_context * mctx, const std::string & promp
+     if (tokenized != 0) {
+         throw std::runtime_error("Failed to tokenize prompt");
+     }
+-    auto result = server_tokens(chunks, true);
++    auto result = server_tokens(chunks, !files.empty());
+     return result;
+ }
+ 

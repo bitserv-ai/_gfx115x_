@@ -2185,6 +2185,38 @@ packages:
           node lookup, switch default abort. ops.cpp: CPU get_rows+add_id
           guards with i3*nb3.
 
+      # 6. Review-4 fix campaign hardening (BUILD-FIXES #188-#192)
+      - type: patch
+        path: "${VLLM_DIR}/patches/vl-server-common.patch"
+        description: >-
+          Review-4 #192 (T-A.7/T-A.19): server-common.cpp —
+          process_mtmd_prompt sets has_mtmd from !files.empty() instead
+          of hardcoded true; get_common_prefix clamps LCP before the
+          first media chunk for mtmd token sets.
+      - type: patch
+        path: "${VLLM_DIR}/patches/shift-guard-completion.patch"
+        description: >-
+          Review-4 #191 (T-A.11): completion.cpp — stop gracefully when
+          ctx_shift is requested but memory is not shiftable
+          (llama_memory_can_shift check).
+      - type: patch
+        path: "${VLLM_DIR}/patches/shift-guard-passkey.patch"
+        description: >-
+          Review-4 #191 (T-A.11): passkey.cpp — startup guard + clean
+          exit when memory is not shiftable (replaces GGML_ASSERT abort
+          on n_pos_per_embd != 1).
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-cpu-repack.patch"
+        description: >-
+          Review-4 #191 (T-B.5): repack.cpp mul_mat_id — skip-and-zero
+          on sentinel expert IDs instead of GGML_ASSERT (Contract C3).
+      - type: patch
+        path: "${VLLM_DIR}/patches/ser-cpu-spacemit-ime.patch"
+        description: >-
+          Review-4 #191 (T-B.5): spacemit ime.cpp mul_mat_id —
+          skip-and-zero on sentinel expert IDs instead of GGML_ASSERT
+          (Contract C3).
+
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
     branch: "v10.9.0"

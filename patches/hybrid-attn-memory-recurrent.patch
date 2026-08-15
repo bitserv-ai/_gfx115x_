@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 6a4892fb4..811fcb229 100644
+index 6a4892fb4..65017f84f 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
 @@ -132,6 +132,7 @@ void llama_memory_recurrent::clear(bool data) {
@@ -74,6 +74,15 @@ index 6a4892fb4..811fcb229 100644
  }
  
  std::map<ggml_backend_buffer_type_t, size_t> llama_memory_recurrent::memory_breakdown() const {
+@@ -515,7 +535,7 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+             if (seq_id < 0 || (uint32_t) seq_id >= size) {
+                 // too big seq_id
+                 // TODO: would it be possible to resize the cache instead?
+-                LLAMA_LOG_ERROR("%s: seq_id=%d >= n_seq_max=%u Try using a bigger --parallel value\n", __func__, seq_id, n_seq_max);
++                LLAMA_LOG_ERROR("%s: seq_id=%d >= size=%u Try using a bigger --parallel value\n", __func__, seq_id, size);
+                 return false;
+             }
+             if (j > 0) {
 @@ -676,6 +696,9 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
              if (cells[i].src < 0) {
                  GGML_ASSERT(rs_z >= 0);
@@ -84,10 +93,15 @@ index 6a4892fb4..811fcb229 100644
              } else {
                  // Stage the source ids for all used cells to allow correct seq_* behavior
                  // and still make these values available when setting the inputs
-@@ -700,6 +723,537 @@ bool llama_memory_recurrent::get_can_shift() const {
-     return true;
+@@ -696,10 +719,542 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
  }
  
+ bool llama_memory_recurrent::get_can_shift() const {
+-    // shifting the pos is trivial for recurrent models
++    // seq_add only relabels positions; the recurrent state keeps contributions from shifted-out tokens
++    return true;
++}
++
 +//
 +// Recurrent state checkpoint — save/restore around shrink/expand
 +//
@@ -464,9 +478,9 @@ index 6a4892fb4..811fcb229 100644
 +        n = 0;
 +    }
 +
-+    return true;
-+}
-+
+     return true;
+ }
+ 
 +int32_t llama_memory_recurrent::get_cell_tail(llama_seq_id seq_id) const {
 +    if (seq_id < 0 || (uint32_t) seq_id >= size) {
 +        return -1;
@@ -538,6 +552,7 @@ index 6a4892fb4..811fcb229 100644
 +    // seq_cp(), and leaving a sibling's tail dangling would crash find_slot()
 +    // at GGML_ASSERT(cell.has_seq_id(seq_id)).
 +    for (llama_seq_id other : cells[cell_idx].seq_id) {
++        set_rs_idx(other, 0);
 +        if ((uint32_t) other < size) {
 +            cells[other].tail = -1;
 +        }
@@ -622,7 +637,7 @@ index 6a4892fb4..811fcb229 100644
  size_t llama_memory_recurrent::total_size() const {
      size_t size = 0;
      for (const auto & [_, buf] : ctxs_bufs) {
-@@ -839,6 +1393,25 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
+@@ -839,6 +1394,31 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
          } else {
              set_rs_idx(seq_id, 0);
          }
@@ -631,8 +646,14 @@ index 6a4892fb4..811fcb229 100644
 +        // primary row (row 0).  Snapshot rows 1..n_rs_seq still contain
 +        // stale data.  Copy the primary row to every snapshot row so that
 +        // every rollback plane carries the just-restored state.
-+        if (seq_id != -1 && res) {
-+            int32_t cell_idx = cells[seq_id].tail;
++        if (seq_id == -1) {
++            for (uint32_t i = 0; i < size; i++) {
++                if (!cells[i].is_empty()) {
++                    cell_copy_primary_to_snapshots(i);
++                }
++            }
++        } else {
++            int32_t cell_idx = get_cell_tail(seq_id);
 +            if (cell_idx < 0) {
 +                for (uint32_t i = 0; i < size; i++) {
 +                    if (cells[i].has_seq_id(seq_id)) {
@@ -648,7 +669,18 @@ index 6a4892fb4..811fcb229 100644
      }
  }
  
-@@ -1258,5 +1831,5 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
+@@ -1012,8 +1592,8 @@ bool llama_memory_recurrent::state_read_meta(llama_io_read_i & io, uint32_t cell
+                 llama_seq_id seq_id;
+                 io.read(&seq_id, sizeof(seq_id));
+ 
+-                if (seq_id < 0 || (uint32_t) seq_id >= this->n_seq_max) {
+-                    LLAMA_LOG_ERROR("%s: invalid seq_id, %d is out of range [0, %u)\n", __func__, seq_id, this->n_seq_max);
++                if (seq_id < 0 || (uint32_t) seq_id >= size || (uint32_t) seq_id >= this->n_seq_max) {
++                    LLAMA_LOG_ERROR("%s: invalid seq_id, %d is out of range [0, %u)\n", __func__, seq_id, std::min(size, this->n_seq_max));
+                     return false;
+                 }
+ 
+@@ -1258,5 +1838,5 @@ int32_t llama_memory_recurrent_context::s_copy(int i) const {
              mem->rs_idx[seq] = 0;
          }
      }
