@@ -27,10 +27,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   backend-registry detection (`Vulkan` registry name) instead of the
   never-matching `strstr(name, "vulkan")`; positive `SER active` log;
   `ser_bf16` and `output_bias == 0.0f` gates restored in the tree and
-  patches resynced; one-time warning when SER params are present but
-  topk_moe fusion does not fire; GROVEMOE sentinel preservation
-  (ggml_floor). Live speedup re-measurement pending (prior claim not
-  attributable to SER).
+  patches resynced; graph-level one-time warning when SER params are
+  present but no topk_moe fusion fires (runtime-validated 2026-08-15:
+  the original execution-time warning false-alarmed on partially fused
+  graphs); GROVEMOE sentinel preservation (ggml_floor). Re-measured
+  speedup: +1.45 % (`--ser 4,0.2`) / +4.7 % (`--ser 5,0.4`) on
+  Qwen3.6-35B-A3B IQ4_NL TG — below the original claim, which was not
+  attributable to SER; `--ser` stays out of the recipes for now.
 - **VL correctness cluster** (#192): `has_mtmd` now reflects the actual
   request (`!files.empty()`) instead of hardcoded true — text-only
   requests on VL models regain LCP prefix reuse and checkpoint restore;
@@ -39,6 +42,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Review-4 follow-up hardening** (#193): std checkpoint search strict
+  predicate (`pos_max < pos_next`), checkpoint prune boundary for
+  hybrid/recurrent memory (`pos_max >= n_past_prefix` discarded —
+  boundary state contains the diverging token), completion self-extend
+  shift guard, Vulkan Vector shader offset hardening, hybrid
+  get_can_shift comment correction. All defense-in-depth; verified per
+  item.
 - **Checkpoint load/save abort → bool + fallback** (#188): checkpoint
   load/save failures no longer abort the whole server (SIGABRT). Load
   failures fall back to full re-evaluation; save failures drop the

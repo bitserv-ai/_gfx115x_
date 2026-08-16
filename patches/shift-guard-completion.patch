@@ -1,6 +1,6 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/tools/completion/completion.cpp b/tools/completion/completion.cpp
-index 6747558fc..a3a28983b 100644
+index 6747558fc..ed937c9d1 100644
 --- a/tools/completion/completion.cpp
 +++ b/tools/completion/completion.cpp
 @@ -607,7 +607,7 @@ int llama_completion(int argc, char ** argv) {
@@ -12,3 +12,15 @@ index 6747558fc..a3a28983b 100644
                          LOG_WRN("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
                          break;
                      }
+@@ -637,6 +637,11 @@ int llama_completion(int argc, char ** argv) {
+                 }
+             } else {
+                 // context extension via Self-Extend
++                if (n_past >= ga_i + ga_w && !llama_memory_can_shift(mem)){
++                    LOG_WRN("\n\n%s: context full and context shift is disabled => stopping\n", __func__);
++                    break;
++                }
++
+                 while (n_past >= ga_i + ga_w) {
+                     const int ib = (ga_n*ga_i)/ga_w;
+                     const int bd = (ga_w/ga_n)*(ga_n - 1);

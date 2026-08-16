@@ -1,9 +1,20 @@
 <!-- Copyright 2026 bitserv-ai -->
 diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
-index f2d49cbce..9f4e64b36 100644
+index f2d49cbce..dc56ec6ba 100644
 --- a/src/llama-memory-hybrid.cpp
 +++ b/src/llama-memory-hybrid.cpp
-@@ -141,10 +141,19 @@ void llama_memory_hybrid::clear(bool data) {
+@@ -131,7 +131,9 @@ llama_memory_context_ptr llama_memory_hybrid::init_update(llama_context * lctx,
+ }
+ 
+ bool llama_memory_hybrid::get_can_shift() const {
+-    // Shifting is trivially supported for recurrent
++    // Consults only the attention part; seq_add only relabels positions, the recurrent state keeps
++    // contributions from shifted-out tokens; the server auto-disables ctx_shift for hybrid models
++    // and relies on recurrent checkpoints instead
+     return mem_attn->get_can_shift();
+ }
+ 
+@@ -141,10 +143,19 @@ void llama_memory_hybrid::clear(bool data) {
  }
  
  bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -27,7 +38,7 @@ index f2d49cbce..9f4e64b36 100644
      }
      return mem_attn->seq_rm(seq_id, p0, p1);
  }
-@@ -170,12 +179,16 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
+@@ -170,12 +181,16 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
  }
  
  llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {

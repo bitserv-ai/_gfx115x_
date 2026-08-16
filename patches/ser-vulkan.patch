@@ -64,7 +64,7 @@ index c555831ce..9253c73c7 100644
          ggml_vec_cpy_f32(nc,
                  (float *) ((char *)  dst->data + i10*nb1  + i11*nb2  + i12*nb3),
 diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-index c0ab9f1c6..bd43ca442 100644
+index c0ab9f1c6..4f65ec125 100644
 --- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 +++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 @@ -1158,6 +1158,7 @@ struct vk_mat_vec_id_push_constants {
@@ -149,11 +149,36 @@ index c0ab9f1c6..bd43ca442 100644
      GGML_ASSERT(n_expert_used <= n_experts);
  
      const uint32_t rows_per_block = 4;
-@@ -12908,6 +12937,14 @@ static void ggml_vk_rope(ggml_backend_vk_context * ctx, vk_context& subctx, cons
- static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
-     const uint32_t * op_params = (const uint32_t *)dst->op_params;
+@@ -16309,6 +16338,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+     uint64_t batch_flops = 0;
+     uint64_t total_flops = 0;
+     uint64_t flops_per_submit = std::min(uint64_t(200'000'000'000), ctx->last_total_flops / 40u);
++    bool ser_params_present = false;
++    bool topk_moe_fusion_fired = false;
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         if (first_node_in_batch) {
+             submit_node_idx = i;
+@@ -16551,6 +16582,15 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+             }
+         }
  
-+    if (op_params[1] != 0) {
++        if (enqueued) {
++            if (cgraph->nodes[i]->op == GGML_OP_ARGSORT && ggml_get_op_params_i32(cgraph->nodes[i], 1) != 0) {
++                ser_params_present = true;
++            }
++            if (ctx->fused_topk_moe_mode != TOPK_MOE_COUNT) {
++                topk_moe_fusion_fired = true;
++            }
++        }
++
+         if (enqueued) {
+             ++submitted_nodes;
+ 
+@@ -16575,6 +16615,14 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         ctx->fused_ops_write_mask = 0;
+     }
+ 
++    if (ser_params_present && !topk_moe_fusion_fired) {
 +        static bool ser_fusion_warned = false;
 +        if (!ser_fusion_warned) {
 +            ser_fusion_warned = true;
@@ -161,9 +186,9 @@ index c0ab9f1c6..bd43ca442 100644
 +        }
 +    }
 +
-     uint32_t ncols = src0->ne[0];
-     uint32_t nrows = ggml_nrows(src0);
+     ctx->last_total_flops = total_flops;
  
+     if (vk_perf_logger_enabled) {
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp b/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp
 index 495249d5f..22def8daa 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp
@@ -264,7 +289,7 @@ index 5a9d0e778..4cb6403c9 100644
          p.batch_stride_b % 4 == 0 && b_offset % 4 == 0 &&
          p.ncols % 4 == 0 && BLOCK_SIZE % 4 == 0 &&
 diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
-index 4aeda68c7..9bdebd8ab 100644
+index 4aeda68c7..276138437 100644
 --- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
 +++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl
 @@ -7,10 +7,6 @@
@@ -295,7 +320,20 @@ index 4aeda68c7..9bdebd8ab 100644
  #ifdef MUL_MAT_ID
      const uint expert_i0 = gl_WorkGroupID.y;
  #else
-@@ -84,6 +81,13 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
+@@ -66,12 +63,6 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
+     expert_id = data_ids[expert_i0 + p.expert_i1 * p.nbi1];
+ #endif
+ 
+-    a_offset =
+-#ifdef MUL_MAT_ID
+-            expert_id * (p.batch_stride_a / QUANT_K);
+-#else
+-            batch_idx_a * (p.batch_stride_a / QUANT_K);
+-#endif
+     b_offset =
+ #ifdef MUL_MAT_ID
+             (expert_i0 % p.ne11) * p.stride_b + p.expert_i1 * p.batch_stride_b;
+@@ -84,6 +75,20 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
  #else
              batch_idx * p.batch_stride_d;
  #endif
@@ -304,6 +342,13 @@ index 4aeda68c7..9bdebd8ab 100644
 +    if (expert_id >= p.n_experts) {
 +        return false;
 +    }
++#endif
++
++    a_offset =
++#ifdef MUL_MAT_ID
++            expert_id * (p.batch_stride_a / QUANT_K);
++#else
++            batch_idx_a * (p.batch_stride_a / QUANT_K);
 +#endif
 +    return true;
  }

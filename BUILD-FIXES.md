@@ -4374,7 +4374,14 @@ speedup on Qwen3.6-35B-A3B IQ4_NL.
   activated because the backend detection used
   `strstr(name, "vulkan")` against `GGML_VK_NAME = "Vulkan"` (#189/T-B.1).
   The measured output was coherent but not attributable to SER.
-  Re-measure after the next rebuild.
+  **Re-measured 2026-08-15** (post-rebuild, Qwen3.6-35B-A3B IQ4_NL,
+  TG n=128, 3 reps, temp=0): `--ser 4,0.2` +1.45 % (73.09 → 74.15 t/s),
+  `--ser 5,0.4` +4.7 % (76.51 t/s); `--ser 4,0.0` bit-identical to
+  baseline; expert-VEC time −8 % (same dispatch count, early-exit) but
+  the rest of the decode graph absorbs most of the gain — below the
+  originally planned 5-15 % for 4,0.2. Quality at 5,0.4 not validated.
+  Protocol: `workdoc/ser-iq4nl-validation-2026-08-15.md`. Decision:
+  `--ser` stays out of the recipes for now.
 - Gate status: the working tree had drifted from the Aug-10 patch state
   (`ser_bf16` gate and `output_bias == 0.0f` fusion condition missing in
   the tree). Resynced and patches re-cut in #189 (T-B.2/T-B.3/T-B.14).
@@ -5128,8 +5135,12 @@ not attributable to SER.
   `{gate_up_exps, up_exps, gate_exps, down_exps}` plus LoRA a/b ID
   tensors (exactly the tensors that become `mul_mat_id` src0).
 - T-B.3: `&& pc.output_bias == 0.0f` restored in the fusion gate.
-- T-B.8: one-time warning when SER params are present but the topk_moe
-  fusion does not fire (standalone argsort path).
+- T-B.8: one-time warning when SER params are present but no topk_moe
+  fusion fires. Runtime validation (2026-08-15) showed the original
+  execution-time warning (standalone argsort path) false-alarmed on
+  partially fused graphs; replaced with a graph-level check in
+  `ggml_backend_vk_graph_compute` (warn only when zero topk_moe fusions
+  fired in the graph).
 - T-B.12-M (Contract C4): `ggml_floor` wraps the scale in the GROVEMOE
   group-ID normalization so the SER sentinel (−1) survives
   cast→scale→cast (−1×(1/n) ∈ (−1,0) → floor = −1); for valid ids ≥ 0
@@ -5289,3 +5300,55 @@ gate, T-A.19 clamp); no restore-path bypass; non-VL behavior identical
 RAM prompt-cache restore stays blocked for text-only tasks on VL models
 (`slot.prompt.tokens.has_mtmd` model-level init is T-A.15, DEFERRED);
 text-only reuse works via slot-level LCP + checkpoint restore.
+
+### 193. Review-4 follow-up hardening (T-B.8 fix + F1-F3 + prune boundary)
+
+**Files:** `ggml/src/ggml-vulkan/ggml-vulkan.cpp`,
+`ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl`,
+`tools/server/server-context.cpp`, `tools/completion/completion.cpp`,
+`src/llama-memory-hybrid.cpp` — patches `ser-vulkan.patch`,
+`hybrid-attn-server.patch`, `shift-guard-completion.patch`,
+`hybrid-attn-memory-hybrid.patch`
+
+Follow-ups from the Review-4 campaign (#188-#192), its V1-V3 audit, and
+the 2026-08-15 runtime validation — all small, defense-in-depth items:
+
+- **T-B.8 warning fix**: runtime validation showed the execution-time
+  "fusion did not fire" warning false-alarmed on partially fused graphs
+  (fused TOPK_MOE nodes + a few standalone SER argsorts). Replaced with
+  a graph-level check in `ggml_backend_vk_graph_compute`: warns once per
+  process only when SER params are present AND zero topk_moe fusions
+  fired in the graph (signal: `fused_topk_moe_mode`, gated on enqueued
+  nodes).
+- **F1a — std checkpoint search strict predicate**: the std restore
+  search accepted `pos_max == pos_next` (covers the diverging token);
+  for needs_reeval hybrids with n_rs_seq == 0 the corner ended in
+  cell_zero. Now requires `pos_max < pos_next`, mirroring the n_swa == 0
+  block; fallback to earlier checkpoint or full re-eval.
+- **F1b — completion self-extend guard**: the ga_n != 1 path called
+  seq_add/seq_div unguarded; now stops gracefully when memory is not
+  shiftable (`llama_memory_can_shift`), same shape as the T-A.11
+  ctx_shift guard.
+- **F2 — hybrid get_can_shift comment**: replaced the misleading
+  "trivially supported" text with accurate semantics (consults only the
+  attention part; seq_add relabels positions; server auto-disables
+  ctx_shift for hybrids), mirroring the recurrent comment.
+- **F3 — mul_mat_vec_base.glsl hardening**: moved the expert-id-derived
+  `a_offset` computation below the `expert_id >= p.n_experts` bounds
+  check (T-B.9 fragility class); valid path bit-identical, false path
+  reads only d_offset (all 14 consumers checked).
+- **Prune boundary fix**: checkpoint pruning now discards
+  `pos_max >= n_past_prefix` for needs_reeval (was `>`): the boundary
+  checkpoint's recurrent state still contains the diverging token;
+  cross-request restore of such a checkpoint = stale state (D5 class).
+  Pure KV keeps `>` (harmless there).
+
+**Verified**: per-item verify agents PASS; full patch set (25 patches)
+applies cleanly on base a4107133a; affected files byte-identical to the
+working tree.
+
+**Known residuals (documented, not fixed)**: non-splittable slots
+(embedding/rerank) skip the prune+restore region entirely — narrow
+stale-checkpoint trigger when a recurrent/hybrid model serves embeddings
+interleaved with completions on the same slot; examples/tests discard
+the #188 bool returns (never built: LLAMA_BUILD_EXAMPLES/TESTS=OFF).
