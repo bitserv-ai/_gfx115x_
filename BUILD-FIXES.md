@@ -5352,3 +5352,25 @@ working tree.
 stale-checkpoint trigger when a recurrent/hybrid model serves embeddings
 interleaved with completions on the same slot; examples/tests discard
 the #188 bool returns (never built: LLAMA_BUILD_EXAMPLES/TESTS=OFF).
+
+### 194. DeepSeek-OCR-2 multi-tile ASSERT crash
+
+**Symptom**: `llama-server` crashes with
+`GGML_ASSERT((int)chunks.size() == n_row * n_col) failed` at
+`tools/mtmd/mtmd.cpp:1135` when processing images with width or height
+> 768px via DeepSeek-OCR-2 GGUF.
+
+**Root cause**: PR #20975 (commit da3f990a4) added
+`mtmd_image_preprocessor_deepseekocr2::preprocess` which produces 768×768
+tiles but never sets `output.grid_x`/`output.grid_y`. When tiles exist,
+the assert sees `n_row * n_col = 0` while `chunks.size() = N > 0`.
+
+**Fix**: Backport PR #24717 (commit 3e706dd55) + PR #26154 (commit
+717dad5c8). Unified v1/v2 image preprocessor with correct grid_x/grid_y
+assignment + multi-row batching support.
+
+**Patch files** (9): `deepseek-ocr2-clip-graph-h.patch`,
+`deepseek-ocr2-clip-model-h.patch`, `deepseek-ocr2-clip.patch`,
+`deepseek-ocr2-deepseekocr.patch`, `deepseek-ocr2-deepseekocr2.patch`,
+`deepseek-ocr2-models-h.patch`, `deepseek-ocr2-mtmd-image.patch`,
+`deepseek-ocr2-mtmd-image-h.patch`, `deepseek-ocr2-mtmd.patch`.

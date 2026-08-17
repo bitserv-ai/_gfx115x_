@@ -42,6 +42,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **DeepSeek-OCR-2 multi-tile fix** (#194): backport PR #24717 + #26154
+  fixing `GGML_ASSERT(chunks.size() == n_row * n_col)` crash in
+  `mtmd.cpp:1135` when processing images >768px. Unified v1/v2 image
+  preprocessor with correct `grid_x`/`grid_y` assignment for multi-tile
+  dynamic resolution + multi-row batching. 9 patch files across
+  `tools/mtmd/`.
 - **Review-4 follow-up hardening** (#193): std checkpoint search strict
   predicate (`pos_max < pos_next`), checkpoint prune boundary for
   hybrid/recurrent memory (`pos_max >= n_past_prefix` discarded —

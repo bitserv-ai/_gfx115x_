@@ -1,0 +1,33 @@
+<!-- Copyright 2026 bitserv-ai -->
+
+diff --git a/tools/mtmd/models/models.h b/tools/mtmd/models/models.h
+index 12d5e6949..5f1493fa6 100644
+--- a/tools/mtmd/models/models.h
++++ b/tools/mtmd/models/models.h
+@@ -127,6 +127,7 @@ struct clip_graph_deepseekocr : clip_graph {
+     clip_graph_deepseekocr(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
+     ggml_cgraph * build() override;
+     ggml_tensor * build_sam(ggml_tensor * inp); // build the SAM model
++    // bool support_batch() const override { return true; } // TODO: support batch for DeepSeek-OCR v1
+ };
+ 
+ struct clip_graph_deepseekocr2 : clip_graph_deepseekocr {
+diff --git a/tools/mtmd/models/models.h b/tools/mtmd/models/models.h
+index eb924972b..4ee4eb374 100644
+--- a/tools/mtmd/models/models.h
++++ b/tools/mtmd/models/models.h
+@@ -138,12 +138,13 @@ struct clip_graph_deepseekocr : clip_graph {
+     clip_graph_deepseekocr(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
+     ggml_cgraph * build() override;
+     ggml_tensor * build_sam(ggml_tensor * inp); // build the SAM model
+-    // bool support_batch() const override { return true; } // TODO: support batch for DeepSeek-OCR v1
++    bool support_batch() const override { return true; }
+ };
+ 
+ struct clip_graph_deepseekocr2 : clip_graph_deepseekocr {
+     clip_graph_deepseekocr2(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph_deepseekocr(ctx, img) {}
+     ggml_cgraph * build() override; // reuses build_sam() from base
++    bool support_batch() const override { return true; }
+ };
+ 
+ struct clip_graph_conformer : clip_graph {

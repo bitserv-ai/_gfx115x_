@@ -2217,6 +2217,68 @@ packages:
           skip-and-zero on sentinel expert IDs instead of GGML_ASSERT
           (Contract C3).
 
+      # 7. DeepSeek-OCR-2 multi-tile fix (BUILD-FIXES #194).
+      # Backports PR #24717 (commit 3e706dd55) + PR #26154 (commit 717dad5c8):
+      # unified v1/v2 image preprocessor with correct grid_x/grid_y assignment
+      # and multi-row batching support. Fixes GGML_ASSERT crash in mtmd.cpp:1135
+      # when processing images >768px. 9 patch files across tools/mtmd/.
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-clip-graph-h.patch"
+        description: >-
+          clip-graph.h: add img_batch pointer + get_img(idx) accessor to
+          the clip_graph builder for batch-aware multi-tile image access
+          (keeps the img reference for backward compat) (PR #24717).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-clip-model-h.patch"
+        description: >-
+          clip-model.h: add preproc_tile_size field to clip_model (local
+          tile size for the DeepSeek-OCR preprocessor) (PR #24717).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-clip.patch"
+        description: >-
+          clip.cpp: DeepSeek-OCR v1/v2 hparams defaults (min/max tiles,
+          tile size, eps), wire img_batch into the graph builder,
+          tile-aware n_output_tokens math, assert relax (PR #24717).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-deepseekocr.patch"
+        description: >-
+          deepseekocr.cpp: SAM layernorm eps fix (1e-6), multi-tile batch
+          reshape for row images, CLS token per batch item, grid_x/grid_y
+          output weaving with newline insertion. PR #24717 + PR #26154
+          (multi-row batching: n_rows_batch capture, tile-axis merge into
+          batch axis, n_batch = n_tiles_per_row * n_rows_batch).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-deepseekocr2.patch"
+        description: >-
+          deepseekocr2.cpp: multi-row batching support — n_rows_batch
+          capture, tile-axis merge into batch axis, n_batch scaling by
+          n_rows_batch (PR #26154).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-models-h.patch"
+        description: >-
+          models.h: enable support_batch() override for both
+          clip_graph_deepseekocr and clip_graph_deepseekocr2. PR #24717
+          (commented stub) + PR #26154 (uncomment + add v2 override).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-mtmd-image.patch"
+        description: >-
+          mtmd-image.cpp: unified DeepSeek-OCR v1/v2 image preprocessor
+          with correct grid_x/grid_y assignment for multi-tile dynamic
+          resolution. Fixes GGML_ASSERT(chunks.size() == n_row * n_col)
+          crash on images >768px (PR #24717).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-mtmd-image-h.patch"
+        description: >-
+          mtmd-image.h: mtmd_image_preprocessor_deepseekocr2 class
+          definition with grid_x/grid_y members and preprocess method
+          (PR #24717).
+      - type: patch
+        path: "${VLLM_DIR}/patches/deepseek-ocr2-mtmd.patch"
+        description: >-
+          mtmd.cpp: invoke deepseekocr2 preprocessor for DeepSeek-OCR-2
+          GGUF models, routing through the unified v1/v2 preprocessor
+          path (PR #24717).
+
   lemonade:
     repo: "https://github.com/lemonade-sdk/lemonade.git"
     branch: "v10.9.0"
